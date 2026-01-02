@@ -1,7 +1,5 @@
 #include "threads/loader.h"
 
-        .text
-
 /* Main interrupt entry point.
 
    An internal or external interrupt starts in one of the
@@ -12,64 +10,59 @@
    We save the rest of the `struct intr_frame' members to the
    stack, set up some registers as needed by the kernel, and then
    call intr_handler(), which actually handles the interrupt.
-
-   We "fall through" to intr_exit to return from the interrupt.
 */
+.section .text
 .func intr_entry
 intr_entry:
 	/* Save caller's registers. */
-	pushl %ds
-	pushl %es
-	pushl %fs
-	pushl %gs
-   # Make space to save the FPU
-	subl $108, %esp
-	# Saving the FPU
-	fsave (%esp)
-	pushal
-
-	/* Set up kernel environment. */
+	subq $16,%rsp
+	movw %ds,8(%rsp)
+	movw %es,0(%rsp)
+	subq $120,%rsp
+	movq %rax,112(%rsp)
+	movq %rbx,104(%rsp)
+	movq %rcx,96(%rsp)
+	movq %rdx,88(%rsp)
+	movq %rbp,80(%rsp)
+	movq %rdi,72(%rsp)
+	movq %rsi,64(%rsp)
+	movq %r8,56(%rsp)
+	movq %r9,48(%rsp)
+	movq %r10,40(%rsp)
+	movq %r11,32(%rsp)
+	movq %r12,24(%rsp)
+	movq %r13,16(%rsp)
+	movq %r14,8(%rsp)
+	movq %r15,0(%rsp)
 	cld			/* String instructions go upward. */
-	mov $SEL_KDSEG, %eax	/* Initialize segment registers. */
-	mov %eax, %ds
-	mov %eax, %es
-	leal 56(%esp), %ebp	/* Set up frame pointer. */
-
-	/* Call interrupt handler. */
-	pushl %esp
-.globl intr_handler
+	movq $SEL_KDSEG, %rax
+	movw %ax, %ds
+	movw %ax, %es
+	movw %ax, %ss
+	movw %ax, %fs
+	movw %ax, %gs
+	movq %rsp,%rdi
 	call intr_handler
-	addl $4, %esp
-.endfunc
-
-/* Interrupt exit.
-
-   Restores the caller's registers, discards extra data on the
-   stack, and returns to the caller.
-
-   This is a separate function because it is called directly when
-   we launch a new user process (see start_process() in
-   userprog/process.c). */
-.globl intr_exit
-.func intr_exit
-intr_exit:
-	/* Restore caller's registers. */
-	popal
-   # Restoring the FPU
-	frstor (%esp)
-	# Remove space from the stack: 108
-	addl $108, %esp
-	popl %gs
-	popl %fs
-	popl %es
-	popl %ds
-
-        /* Discard `struct intr_frame' vec_no, error_code,
-           frame_pointer members. */
-	addl $12, %esp
-
-        /* Return to caller. */
-	iret
+	movq 0(%rsp), %r15
+	movq 8(%rsp), %r14
+	movq 16(%rsp), %r13
+	movq 24(%rsp), %r12
+	movq 32(%rsp), %r11
+	movq 40(%rsp), %r10
+	movq 48(%rsp), %r9
+	movq 56(%rsp), %r8
+	movq 64(%rsp), %rsi
+	movq 72(%rsp), %rdi
+	movq 80(%rsp), %rbp
+	movq 88(%rsp), %rdx
+	movq 96(%rsp), %rcx
+	movq 104(%rsp), %rbx
+	movq 112(%rsp), %rax
+	addq $120, %rsp
+	movw 8(%rsp), %ds
+	movw (%rsp), %es
+	addq $32, %rsp
+	iretq
 .endfunc
 
 /* Interrupt stubs.
@@ -98,36 +91,32 @@ intr_exit:
 
         3. Push the interrupt number on the stack. */
 
-	.data
-.globl intr_stubs
-intr_stubs:
-
 /* This implements steps 1 and 2, described above, in the common
    case where we just push a 0 error code. */
-#define zero                                    \
-	pushl %ebp;                             \
-	pushl $0
+#define zero pushq $0;
 
 /* This implements steps 1 and 2, described above, in the case
    where the CPU already pushed an error code. */
-#define REAL                                    \
-        pushl (%esp);                           \
-        movl %ebp, 4(%esp)
+#define REAL
+
+.section .data
+.globl intr_stubs
+intr_stubs:
 
 /* Emits a stub for interrupt vector NUMBER.
    TYPE is `zero', for the case where we push a 0 error code,
    or `REAL', if the CPU pushes an error code for us. */
 #define STUB(NUMBER, TYPE)                      \
-	.text;                                  \
+.section .text;                                  \
+.globl intr##NUMBER##_stub;                     \
 .func intr##NUMBER##_stub;			\
 intr##NUMBER##_stub:                            \
 	TYPE;                                   \
 	push $0x##NUMBER;                       \
-        jmp intr_entry;                         \
-.endfunc;					\
-                                                \
-	.data;                                  \
-	.long intr##NUMBER##_stub;
+	jmp intr_entry;                         \
+.endfunc; \
+.section .data; \
+.quad intr##NUMBER##_stub;
 
 /* All the stubs. */
 STUB(00, zero) STUB(01, zero) STUB(02, zero) STUB(03, zero)
