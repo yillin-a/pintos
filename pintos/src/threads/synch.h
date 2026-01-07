@@ -20,6 +20,9 @@ void sema_self_test(void);
 struct lock {
   struct thread* holder;      /* Thread holding lock (for debugging). */
   struct semaphore semaphore; /* Binary semaphore controlling access. */
+  struct list_elem elem;      /* List element for priority donation. */   
+  int max_priority;          /* Max priority among the threads acquiring the lock. */
+
 };
 
 void lock_init(struct lock*);
@@ -37,6 +40,7 @@ void cond_init(struct condition*);
 void cond_wait(struct condition*, struct lock*);
 void cond_signal(struct condition*, struct lock*);
 void cond_broadcast(struct condition*, struct lock*);
+bool cond_sema_cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux);
 
 /* Readers-writers lock. */
 #define RW_READER 1
@@ -60,3 +64,4 @@ void rw_lock_release(struct rw_lock*, bool reader);
 #define barrier() asm volatile("" : : : "memory")
 
 #endif /* threads/synch.h */
+

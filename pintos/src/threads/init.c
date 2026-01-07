@@ -77,9 +77,6 @@ static void locate_block_device(enum block_type, const char* name);
 int main(void) {
   char** argv;
 
-  /* Initialize the FPU. */
-  asm volatile("fninit");
-
   /* Clear BSS. */
   bss_init();
 

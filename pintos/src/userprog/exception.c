@@ -78,9 +78,7 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
-
-      //Set this to be -2 that way we know when we exit due to an exception versus a user called exit(-1)
-      process_exit(-2);
+      process_exit();
       NOT_REACHED();
 
     case SEL_KCSEG:

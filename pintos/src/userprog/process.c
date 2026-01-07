@@ -26,85 +26,6 @@ static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 
-// 对file syscalls建立一个全局的锁
-struct lock global_prog_lock;
-
-// 初始化一个新的文件描述其器表
-void init_fdtable(fd_list* fdlist) {
-  if (fdlist == NULL)return;
-  list_init(fdlist);
-}
-
-// 传入表格和描述器编号，返回相应描述器的指针，如果在表格中没有相应的描述器，则返回NULL
-thread_FD* find_fd(fd_list* fdlist, int fd) {
-  if (fdlist == NULL) return NULL;
-
-  struct list_elem* e;
-  for (e = list_begin(fdlist); e != list_end(fdlist); e = list_next(e)) {
-    struct FD* curr_fd = list_entry(e, struct FD, elem);
-    if (curr_fd->fd == fd) return curr_fd;
-  }
-  
-  return NULL;
-}
-
-// 传入表格和文件名，返回相应描述器的指针，如果在表格中没有相应的描述器，则返回NULL
-thread_FD* FD_find_filename(fd_list* fdlist, const char* name) {
-  if (fdlist == NULL) return NULL;
-  if (name == NULL) return NULL;
-
-  struct list_elem* e;
-  for (e = list_begin(fdlist); e != list_end(fdlist); e = list_next(e)) {
-    struct FD* curr_fd = list_entry(e, struct FD, elem);
-    if (strcmp(curr_fd->file_name, name) == 0) return curr_fd;
-  }
-
-  return NULL;
-}
-
-//在描述器表格中添加一个描述器
-thread_FD* add_FD(fd_list* fdlist, int fd, struct file* curfile,
-                          const char* name) {
-  if (fdlist == NULL) return NULL;
-  if (curfile == NULL) return NULL;
-  thread_FD* new_FD = (thread_FD*)malloc(sizeof(thread_FD));
-  if (new_FD == NULL) return NULL;
-
-  // 拷贝结构体中的三个变量
-  new_FD->fd = fd;
-  new_FD->file_name = (const char*)malloc(sizeof(char) * (strlen(name) + 1));
-  strlcpy((char*)new_FD->file_name, name, strlen(name) + 1);
-  new_FD->open_file = curfile;
-
-  list_insert(list_end(fdlist), &(new_FD->elem));
-  return new_FD;
-}
-
-// 系统调用关闭过程的实现，process_exit可以访问它
-int process_file_close(int fd_num) {
-  struct thread* t = thread_current();
-
-  // 获取全局的文件系统访问锁，保证原子操作
-  lock_acquire(t->pcb->global_prog_lock);
-
-  // 通过描述器的编号访问相应的描述器
-  int fd = fd_num;
-  thread_FD* found_descriptor = find_fd(t->pcb->fd_blocks, fd);
-
-  if (found_descriptor == NULL) {
-    lock_release(t->pcb->global_prog_lock);
-    return (-1);
-  } else {
-    //清空文件、文件指针、列表元素，清空描述器
-    file_close(found_descriptor->open_file);
-    free((void*)found_descriptor->file_name);
-    list_remove(&(found_descriptor->elem));
-    free((void*)found_descriptor);
-    lock_release(t->pcb->global_prog_lock);
-    return (0);
-  }
-}
-
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
@@ -121,138 +42,89 @@ void userprog_init(void) {
   t->pcb = calloc(sizeof(struct process), 1);
   success = t->pcb != NULL;
 
-  if (success) {
-    t->pcb->fd_blocks = (fd_list*)malloc(sizeof(fd_list));
-
-    init_fdtable(t->pcb->fd_blocks); // 初始化链表
-    t->pcb->fd_next = 2;
-
-    t->pcb->child_thread = (thread_metainfo_list*)malloc(sizeof(thread_metainfo_list)); // 初始化子进程链表
-    list_init(t->pcb->child_thread);
-
-    lock_init(&global_prog_lock); // 初始化全局锁
-    t->pcb->global_prog_lock = &global_prog_lock;
-
-    t->shared = (thread_metainfo*)malloc(sizeof(thread_metainfo));
-    t->shared->share_count = 1;   // 程序执行的开始，只有一个活动的线程
-    t->shared->tid = t->tid;      // 进程中当前正在运行的线程
-    lock_init(&(t->shared->tlock));
-    sema_init(&(t->shared->finish), 0);
-    t->shared->is_loaded = false;
-  }
-
   /* Kill the kernel if we did not succeed */
   ASSERT(success);
 }
 
-/* 启动一个新线程，运行从 FILENAME 加载的用户程序。
-   新线程可能在 process_execute() 返回之前被调度（甚至退出）。
-   返回新进程的进程 ID，如果无法创建线程则返回 TID_ERROR。 */
+/* Starts a new thread running a user program loaded from
+   FILENAME.  The new thread may be scheduled (and may even exit)
+   before process_execute() returns.  Returns the new process's
+   process id, or TID_ERROR if the thread cannot be created. */
 pid_t process_execute(const char* file_name) {
   char* fn_copy;
   tid_t tid;
-  struct thread* t = thread_current();
 
-  /* 复制 FILE_NAME，以避免调用者和 load() 之间的竞争条件 */
+  sema_init(&temporary, 0);
+  /* Make a copy of FILE_NAME.
+     Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
-  if (fn_copy == NULL) return TID_ERROR;
+  if (fn_copy == NULL)
+    return TID_ERROR;
   strlcpy(fn_copy, file_name, PGSIZE);
 
-  /* 分配并初始化线程元数据 */
-  thread_metainfo* data = (thread_metainfo*)malloc(sizeof(thread_metainfo));
-  data->file_copy = fn_copy; // 为线程启动作准备
-  sema_init(&(data->load), 0);
-
-  /* 创建一个新线程来执行 FILE_NAME */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, (void*)data);
-  sema_down(&(data->load));
-
-  if (data->is_loaded && tid != TID_ERROR) {
-    list_insert(list_end(t->pcb->child_thread), &(data->elem));
-    return tid;
-  } else {
-    free(data);
+  /* Create a new thread to execute FILE_NAME. */
+  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+  if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
-    return -1;
-  }
+  return tid;
 }
 
-/* 一个线程函数，用于加载用户进程并开始运行 */
-static void start_process(void* newmetadata) {
-  thread_metainfo* data = (thread_metainfo*)newmetadata;
-  char* file_name = (char*)data->file_copy;
+/* A thread function that loads a user process and starts it
+   running. */
+static void start_process(void* file_name_) {
+  char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
 
-  /* 分配进程控制块 */
+  /* Allocate process control block */
   struct process* new_pcb = malloc(sizeof(struct process));
   success = pcb_success = new_pcb != NULL;
 
-  /* 初始化进程控制块 */
+  /* Initialize process control block */
   if (success) {
-    // 确保 timer_interrupt() -> schedule() -> process_activate()
-    // 不会尝试激活未初始化的页目录
+    // Ensure that timer_interrupt() -> schedule() -> process_activate()
+    // does not try to activate our uninitialized pagedir
     new_pcb->pagedir = NULL;
     t->pcb = new_pcb;
 
-    // 继续初始化进程控制块
+    // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
-
-    t->pcb->fd_blocks = (fd_list*)malloc(sizeof(fd_list)); // 分配文件描述符列表
-    init_fdtable(t->pcb->fd_blocks);   // 初始化文件描述符列表
-    t->pcb->fd_next = 2;
-
-    t->pcb->child_thread = (thread_metainfo_list*)malloc(sizeof(thread_metainfo_list));
-    list_init(t->pcb->child_thread);
-    t->shared = data;
-
-    lock_init(&global_prog_lock);         // 初始化全局锁
-    t->pcb->global_prog_lock = &global_prog_lock;
-
-    // 初始化共享结构体的元素
-    t->shared->share_count = 2;
-    t->shared->tid = t->tid;
-    lock_init(&(t->shared->tlock));
-    sema_init(&(t->shared->finish), 0);
-    t->shared->is_loaded = false;
   }
 
-  /* 初始化中断帧并加载可执行文件 */
+  /* Initialize interrupt frame and load executable. */
   if (success) {
     memset(&if_, 0, sizeof if_);
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
-    /* 保存当前 FPU 的值 */
-    asm volatile("fsave %0" : "=m"(if_.fpu));
     success = load(file_name, &if_.eip, &if_.esp);
   }
 
-  /* 处理加载失败的情况 */
+  /* Handle failure with succesful PCB malloc. Must free the PCB */
   if (!success && pcb_success) {
-    // 避免在 t->pcb 被设置为 NULL 之前释放 PCB
+    // Avoid race where PCB is freed before t->pcb is set to NULL
+    // If this happens, then an unfortuantely timed timer interrupt
+    // can try to activate the pagedir, but it is now freed memory
     struct process* pcb_to_free = t->pcb;
-    // 关闭可执行文件、释放子线程列表、释放文件描述符表
-    file_close(t->pcb->executable);
-    free(t->pcb->child_thread);
-    free(t->pcb->fd_blocks);
     t->pcb = NULL;
     free(pcb_to_free);
   }
 
+  /* Clean up. Exit on failure or jump to userspace */
+  palloc_free_page(file_name);
   if (!success) {
-    // 通知父进程子进程加载失败
-    sema_up(&(t->shared->finish));
+    sema_up(&temporary);
     thread_exit();
   }
 
-  /* 清理。失败时退出或跳转到用户空间 */
-  palloc_free_page(file_name);
-
-  /* 通过模拟中断返回开始用户进程，由 intr_exit (在 threads/intr-stubs.S) 实现。
-     因为 intr_exit 通过堆栈接收参数，我们只需将堆栈指针 (%esp) 指向我们的堆栈帧并跳转 */
+  /* Start the user process by simulating a return from an
+     interrupt, implemented by intr_exit (in
+     threads/intr-stubs.S).  Because intr_exit takes all of its
+     arguments on the stack in the form of a `struct intr_frame',
+     we just point the stack pointer (%esp) to our stack frame
+     and jump to it. */
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
 }
@@ -266,92 +138,21 @@ static void start_process(void* newmetadata) {
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int process_wait(pid_t child_pid) {
-  struct thread* t = thread_current();
-  struct list_elem* e;
-  //iterate through child list and search for child with a given pid
-  if (!list_empty(t->pcb->child_thread)) {
-    for (e = list_begin(t->pcb->child_thread); e != list_end(t->pcb->child_thread); e = list_next(e)) {
-      thread_metainfo* cur_md = list_entry(e, thread_metainfo, elem);
-      if (cur_md->tid == child_pid) {
-        //wait till child has finished by downing finish semaphore
-        sema_down(&(cur_md->finish));
-        //store exit_code from child's meta_info
-        int exit = cur_md->exit_code;
-        //acquire lock to decrement share_count to avoid race conditions
-        lock_acquire(&(cur_md->tlock));
-        cur_md->share_count -= 1;
-        int temp = cur_md->share_count;
-        lock_release(&(cur_md->tlock));
-        //remove waited child from parent's child list
-        list_remove(e);
-        //if share_count is 0, free meta_info
-        if (temp == 0) free(cur_md);
-        //since we have a unique exit code for errors, we want to ensure that if -2 is returned, we turn it into -1 so it is handled properly.
-        if (exit == -2) return -1;
-        return exit;
-      }
-    }
-  }
-  return -1;
+int process_wait(pid_t child_pid UNUSED) {
+  sema_down(&temporary);
+  return 0;
 }
 
 /* Free the current process's resources. */
-//Changed process exit to take an exit code as an input
-void process_exit(int exit_code) {
+void process_exit(void) {
   struct thread* cur = thread_current();
   uint32_t* pd;
-  //store exit code in thread's meta_info
-  cur->shared->exit_code = exit_code;
 
   /* If this thread does not have a PCB, don't worry */
   if (cur->pcb == NULL) {
     thread_exit();
     NOT_REACHED();
-  } else if (exit_code == -2) {
-    //printing the exit code if we exited due to an error. Set to -2 because only excpetion should return
-    //an exit code of -2
-    printf("%s: exit(%d)\n", thread_current()->pcb->process_name, exit_code + 1);
   }
-
-  //close the executable before we free the pcb
-  file_close(cur->pcb->executable);
-
-  //Iterate through the file descriptor list and close all of the file descriptors that are still open
-  while (!list_empty(cur->pcb->fd_blocks)) {
-    thread_FD* fd_entry = list_entry(list_begin(cur->pcb->fd_blocks), thread_FD, elem);
-    process_file_close(fd_entry->fd);
-  }
-  //free the file descriptor list from the heap
-  free((void*)cur->pcb->fd_blocks);
-
-  //**********************************
-  lock_acquire(&(cur->shared->tlock));
-  cur->shared->share_count -= 1;
-  int temp = cur->shared->share_count;
-  lock_release(&(cur->shared->tlock));
-
-  if (temp == 0) {
-    free(cur->shared);
-  }
-
-  //iterate through all children and decrement their shared data's share_count
-  struct list_elem* temp_next, *e;
-  if (!list_empty(cur->pcb->child_thread)) {
-    for (e = list_begin(cur->pcb->child_thread); e != list_end(cur->pcb->child_thread);) {
-      thread_metainfo* cur_md = list_entry(e, thread_metainfo, elem);
-      //acquire lock to decrement share_count to avoid race conditions and free if 0
-      lock_acquire(&(cur_md->tlock));
-      cur_md->share_count -= 1;
-      int temp = cur_md->share_count;
-      lock_release(&(cur_md->tlock));
-      temp_next = list_next(e);
-      if (temp == 0) free(cur_md);
-      e = temp_next;
-    }
-  }
-  //free threads list struct of children
-  free((void*)cur->pcb->child_thread);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -376,9 +177,8 @@ void process_exit(int exit_code) {
   struct process* pcb_to_free = cur->pcb;
   cur->pcb = NULL;
   free(pcb_to_free);
-  //up on finish semaphore so waiting parent can continue
-  sema_up(&(cur->shared->finish));
 
+  sema_up(&temporary);
   thread_exit();
 }
 
@@ -476,52 +276,6 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   bool success = false;
   int i;
 
-
-  // 赋值整行参数
-  char* file_copy = malloc(sizeof(char) * (strlen(file_name) + 1));
-  strlcpy(file_copy, file_name, strlen(file_name) + 1);
-
-  int numspaces = 0;  //参数的数量
-  bool last = false;// 用于忽略多个空格
-
-  // 计算传入参数的数量 -1
-  for (unsigned i = 0; i < strlen(file_name); i++) {
-    if (file_name[i] == ' ' && !last) {
-        numspaces += 1;
-        last = true;
-    } else {
-      last = false;
-    }
-  }
-
-  //分配数组保存参数
-  int argc = numspaces + 1;
-  char* argv[argc + 1];
-  argv[argc] = NULL;
-  int counter = 0;
-
-  // 将一整行的所有输入分离成若干个单词，然后保存在一个数组中
-  char* saveptr = NULL;
-  for (char* token_elem = strtok_r(file_copy, " ", &saveptr); token_elem != NULL;
-       token_elem = strtok_r(NULL, " ", &saveptr)) {
-
-    // Parse file, store in argv
-    int len = strlen(token_elem);
-    argv[counter] = (char*)malloc(sizeof(char) * (len + 1));
-    strlcpy(argv[counter], token_elem, len + 1);
-    counter++;
-  }
-
-  /// 如果没有输入参数
-  if (argc == 0) {
-    success = false;
-    printf("%s/n", "Didn't pass in anything");
-    return success;
-  }
-
-  //Set the process name to be the name of the test/executable
-  strlcpy(t->pcb->process_name, argv[0], strlen(argv[0]) + 1);
-
   /* Allocate and activate page directory. */
   t->pcb->pagedir = pagedir_create();
   if (t->pcb->pagedir == NULL)
@@ -529,13 +283,10 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   process_activate();
 
   /* Open executable file. */
-  file = filesys_open(argv[0]);
+  file = filesys_open(file_name);
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
     goto done;
-  } else {  //将可执行文件放入pcb中，一边在执行结束时可以释放内存
-    t->pcb->executable = file;
-    file_deny_write(file);
   }
 
   /* Read and verify executable header. */
@@ -603,58 +354,11 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   /* Start address. */
   *eip = (void (*)(void))ehdr.e_entry;
 
-  // 传入参数部分
-  // 把参数逆序压入栈中
-  for (int k = argc - 1; k >= 0; k--) {
-    *esp -= strlen(argv[k]) + 1;
-    memcpy(*esp, argv[k], strlen(argv[k]) + 1);
-    argv[k] = *esp;
-  }
-  /*START STACK ALIGN*/
-  // arg pointers + nullpointer + **argv + argc
-  int numpointers = 3 + argc;
-  int amount_to_decrement = ((unsigned)*esp - numpointers * 4) % 16;
-  *esp -= amount_to_decrement;
-  /*END STACK ALIGN*/
-
-  /*push addresses of arguments in reverse order*/
-  for (int k = argc; k >= 0; k--) {
-    *esp -= 4;
-    *(uint32_t*)*esp = (int)(uint32_t*)argv[k];
-  }
-
-  /*push **argv */
-  *esp -= 4;
-  *(uint32_t*)*esp = (int)(*esp + 4);
-
-  /*push argc */
-  *esp -= 4;
-  *(uint32_t*)*esp = argc;
-
-  /*push fake return address */
-  *esp -= 4;
-  *(uint32_t*)*esp = 0;
-
   success = true;
 
 done:
   /* We arrive here whether the load is successful or not. */
-  // Commenting this out here so we can close the executable in process exit and prevent writing to the executable
-  // during the entire process
-  // file_close(file);
-
-  //Free resources if the load fails
-  if (!success) {
-    free(file_copy);
-    for (int i = 0; i < counter; i++) {
-      free(argv[i]);
-    }
-  }
-
-  // 将是否成功传值的结果存放在线程的原数据中
-  t->shared->is_loaded = success;
-  //up load semaphore for process_execute to continue executing
-  sema_up(&(t->shared->load));
+  file_close(file);
   return success;
 }
 
