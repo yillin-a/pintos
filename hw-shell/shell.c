@@ -14,392 +14,395 @@
 
 #include "tokenizer.h"
 
-/* Convenience macro to silence compiler warnings about unused function parameters. */
-#define unused __attribute__((unused))
+/* 忽略编译器关于未使用参数的警告 */
+#define UNUSED_PARAM __attribute__((unused))
 
-/* Whether the shell is connected to an actual terminal or not. */
-bool shell_is_interactive;
+/* shell是否连接到真实终端 */
+bool is_interactive_mode;
 
-/* File descriptor for the shell input */
-int shell_terminal;
+/* shell输入的文件描述符 */
+int terminal_fd;
 
-/* Terminal mode settings for the shell */
-struct termios shell_tmodes;
+/* shell的终端模式设置 */
+struct termios original_terminal_settings;
 
-/* Process group id for the shell */
-pid_t shell_pgid;
+/* shell的进程组ID */
+pid_t shell_process_group;
 
-int cmd_exit(struct tokens *tokens);
-int cmd_help(struct tokens *tokens);
-int cmd_pwd(struct tokens *tokens);
-int cmd_cd(struct tokens *tokens);
-int cmd_run_prog(struct tokens *tokens);
+int execute_exit(struct tokens *tokens);
+int execute_help(struct tokens *tokens);
+int execute_pwd(struct tokens *tokens);
+int execute_cd(struct tokens *tokens);
+int execute_external_program(struct tokens *tokens);
 
-/* Built-in command functions take token array (see parse.h) and return int */
-typedef int cmd_fun_t(struct tokens *tokens);
+/* 内置命令函数接受token数组并返回int */
+typedef int command_func_t(struct tokens *tokens);
 
-/* Built-in command struct and lookup table */
-typedef struct fun_desc
+/* 内置命令结构体和查找表 */
+typedef struct command_descriptor
 {
-  cmd_fun_t *fun;
-  char *cmd;
-  char *doc;
-} fun_desc_t;
+  command_func_t *function_ptr;
+  char *command_name;
+  char *description;
+} command_descriptor_t;
 
-fun_desc_t cmd_table[] = {
-    {cmd_help, "?", "show this help menu"},
-    {cmd_exit, "exit", "exit the command shell"},
-    {cmd_pwd, "pwd", "prints the current working directory"},
-    {cmd_cd, "cd", "change derectory to the specific one"},
-    {cmd_run_prog, "run_prog", "execute programs entered"}
+command_descriptor_t builtin_commands[] = {
+    {execute_help, "?", "show this help menu"},
+    {execute_exit, "exit", "exit the command shell"},
+    {execute_pwd, "pwd", "prints the current working directory"},
+    {execute_cd, "cd", "change derectory to the specific one"},
+    {execute_external_program, "run_prog", "execute programs entered"}
 };
 
-/* Prints a helpful description for the given command */
-int cmd_help(unused struct tokens *tokens)
+/* 打印给定命令的帮助描述 */
+int execute_help(UNUSED_PARAM struct tokens *tokens)
 {
-  for (unsigned int i = 0; i < sizeof(cmd_table) / sizeof(fun_desc_t); i++)
-    printf("%s - %s\n", cmd_table[i].cmd, cmd_table[i].doc);
+  unsigned int idx;
+  for (idx = 0; idx < sizeof(builtin_commands) / sizeof(command_descriptor_t); idx++)
+    printf("%s - %s\n", builtin_commands[idx].command_name, builtin_commands[idx].description);
   return 1;
 }
 
-/* Exits this shell */
-int cmd_exit(unused struct tokens *tokens) { exit(0); }
+/* 退出当前shell */
+int execute_exit(UNUSED_PARAM struct tokens *tokens) { exit(0); }
 
-/* 输出当前的工作目录 */
-int cmd_pwd(unused struct tokens *tokens)
+/* 打印当前工作目录 */
+int execute_pwd(UNUSED_PARAM struct tokens *tokens)
 {
-  char current_directory[4096];
-  if (getcwd(current_directory, sizeof(current_directory)) != NULL) {
-    printf("%s\n", current_directory);
+  char working_dir[4096];
+  if (getcwd(working_dir, sizeof(working_dir)) != NULL) {
+    printf("%s\n", working_dir);
   } else {
     perror("Error! Cannot acquire current directory.\nPossibly since...");
   }
   return 0;
 }
 
-/* 转换当前工作路径至指定的工作路径*/
-int cmd_cd(struct tokens *tokens)
+/* 切换当前工作目录到指定目录 */
+int execute_cd(struct tokens *tokens)
 {
-  // 检查输入格式是否正确
+  // 验证输入参数数量是否正确
   if (tokens_get_length(tokens) != 2){
     printf("cd: Error! Expected 1 params!\n");
     return 1;
   }
 
-  // 跳转路径并检查是否转换成功
-  char *path = tokens_get_token(tokens, 1);
-  if (chdir(path) != 0){
+  // 执行目录切换并验证是否成功
+  char *target_path = tokens_get_token(tokens, 1);
+  if (chdir(target_path) != 0){
     perror("Change error!");
     return 1;
   }
   return 0;
 }
 
-// 根据输入的字符串返回完整路径，确保返回的路径是存在的，返回NULL表示不能根据输入找到存在的路径
-char *get_path_real(const char *input_path)
+// 根据输入字符串返回完整路径，确保路径存在，返回NULL表示路径无效
+char *resolve_program_path(const char *program_name)
 {
-  // 如果输入路径为空，直接返回 NULL
-  if (input_path == NULL) {
+  // 输入路径为空则直接返回NULL
+  if (program_name == NULL) {
     return NULL;
   }
 
-  // 如果输入路径以斜杠开头，表示这是一个绝对路径
-  if (input_path[0] == '/') {
-    // 检查路径是否存在
-    if (access(input_path, F_OK) != -1) {
-      // 返回路径的副本
-      return strdup(input_path);
+  // 如果输入以斜杠开头，这是绝对路径
+  if (program_name[0] == '/') {
+    // 验证路径是否存在
+    if (access(program_name, F_OK) != -1) {
+      // 返回路径副本
+      return strdup(program_name);
     } else {
       return NULL;
     }
   }
 
-  // 获取环境变量 PATH 的值
-  char *env_path = getenv("PATH");
-  // 如果 PATH 环境变量为空，直接返回 NULL
-  if (env_path == NULL) {
+  // 获取PATH环境变量
+  char *path_env = getenv("PATH");
+  // PATH环境变量为空则返回NULL
+  if (path_env == NULL) {
     return NULL;
   }
 
-  // 复制 PATH 环境变量以进行后续操作
-  char *env_path_copy = strdup(env_path);
-  if (env_path_copy == NULL) {
+  // 复制PATH环境变量用于后续处理
+  char *path_copy = strdup(path_env);
+  if (path_copy == NULL) {
     perror("Memory allocation failed");
     exit(EXIT_FAILURE);
   }
 
-  // 使用 strtok 函数以冒号为分隔符分割 PATH 环境变量
-  char *path = strtok(env_path_copy, ":");
-  while (path != NULL) {
-    // 计算完整路径的长度
-    size_t path_length = strlen(path) + strlen(input_path) + 2;
-    // 分配内存存储完整路径
-    char *full_path = (char *)malloc(path_length);
-    if (full_path == NULL) {
+  // 用冒号作为分隔符分割PATH环境变量
+  char *directory = strtok(path_copy, ":");
+  while (directory != NULL) {
+    // 计算完整路径长度
+    size_t full_length = strlen(directory) + strlen(program_name) + 2;
+    // 分配内存保存完整路径
+    char *candidate_path = (char *)malloc(full_length);
+    if (candidate_path == NULL) {
       perror("Memory allocation failed");
-      free(env_path_copy);
+      free(path_copy);
       exit(EXIT_FAILURE);
     }
 
-    // 拼接得到完整路径
-    snprintf(full_path, path_length, "%s/%s", path, input_path);
+    // 拼接完整路径
+    snprintf(candidate_path, full_length, "%s/%s", directory, program_name);
 
     // 检查完整路径是否存在
-    if (access(full_path, F_OK) != -1) {
+    if (access(candidate_path, F_OK) != -1) {
       // 释放环境变量副本
-      free(env_path_copy);
-      // 返回完整路径的副本
-      char *result = strdup(full_path);
-      if (result == NULL) {
+      free(path_copy);
+      // 返回完整路径副本
+      char *final_result = strdup(candidate_path);
+      if (final_result == NULL) {
         perror("Memory allocation failed");
-        free(full_path);
+        free(candidate_path);
         exit(EXIT_FAILURE);
       }
       // 释放完整路径
-      free(full_path);
-      return result;
+      free(candidate_path);
+      return final_result;
     }
 
     // 释放当前完整路径
-    free(full_path);
+    free(candidate_path);
     // 获取下一个路径
-    path = strtok(NULL, ":");
+    directory = strtok(NULL, ":");
   }
 
-  // 如果没有找到有效路径，释放环境变量副本并返回 NULL
-  free(env_path_copy);
+  // 未找到有效路径，释放环境变量副本并返回NULL
+  free(path_copy);
   return NULL;
 }
-int O_redirect(char *file_path)
+
+int redirect_output_to_file(char *output_file)
 {
-  // 如果文件路径为空，打印错误信息并返回 1
-  if (file_path == NULL) {
+  // 文件路径为空则打印错误并返回1
+  if (output_file == NULL) {
     perror("No output file specified!");
     return 1;
   }
 
-  // 打开文件，以写模式打开，如果文件不存在则自动创建
-  FILE *file = fopen(file_path, "w");
-  if (file == NULL) {
+  // 以写模式打开文件，文件不存在则自动创建
+  FILE *fp = fopen(output_file, "w");
+  if (fp == NULL) {
     perror("Failed to open file: please check the path.");
     return 1;
   }
 
-  // 将标准输出重定向到指定文件
-  if (freopen(file_path, "w", stdout) == NULL) {
+  // 重定向标准输出到指定文件
+  if (freopen(output_file, "w", stdout) == NULL) {
     perror("Error redirecting output!");
-    fclose(file);
+    fclose(fp);
     return 1;
   }
 
   // 关闭原始文件指针
-  fclose(file);
+  fclose(fp);
 
   return 0;
 }
 
-int I_redirect(char *file_path)
+int redirect_input_from_file(char *input_file)
 {
-  // 如果文件路径为空，打印错误信息并返回 1
-  if (file_path == NULL) {
+  // 文件路径为空则打印错误并返回1
+  if (input_file == NULL) {
     perror("No input file specified!");
     return 1;
   }
 
-  // 打开文件，以只读模式打开
-  FILE *file = fopen(file_path, "r");
-  if (file == NULL) {
+  // 以只读模式打开文件
+  FILE *fp = fopen(input_file, "r");
+  if (fp == NULL) {
     perror("Failed to open file: please check the path.");
     return 1;
   }
 
-  // 将标准输入重定向到指定文件
-  if (freopen(file_path, "r", stdin) == NULL) {
+  // 重定向标准输入到指定文件
+  if (freopen(input_file, "r", stdin) == NULL) {
     perror("Error redirecting input!");
-    fclose(file);
+    fclose(fp);
     return 1;
   }
 
   // 关闭原始文件指针
-  fclose(file);
+  fclose(fp);
 
   return 0;
 }
 
-int reset_stdio()
+int restore_standard_io()
 {
   freopen("/dev/tty", "w", stdout);
   freopen("/dev/tty", "r", stdin);
   return 0;
 }
 
-/*使shell支持运行外部程序*/
-int cmd_run_prog(struct tokens *tokens)
+/* 使shell支持运行外部程序 */
+int execute_external_program(struct tokens *tokens)
 {
-  int tokens_length = tokens->tokens_length;
+  int num_tokens = tokens->tokens_length;
   // 检查是否输入了可执行文件路径
-  if (tokens_length < 1){
+  if (num_tokens < 1){
     printf("run: Please enter an executable \n");
     return 1;
   }
 
-  // 获取程序绝对路径
-  char *program_path = get_path_real(tokens->tokens[0]);
-  if (program_path == NULL){
+  // 获取程序的绝对路径
+  char *executable_path = resolve_program_path(tokens->tokens[0]);
+  if (executable_path == NULL){
     printf("File not exists!\n");
     return 1;
   }
-  //  判断是否重定向
-  int is_redirected = 0;
-  if (tokens_length >= 3){
+  
+  // 判断是否需要重定向
+  int has_redirection = 0;
+  if (num_tokens >= 3){
     // 需要重定向输出到文件
-    if (strcmp(tokens->tokens[tokens_length - 2], ">") == 0){
-      is_redirected = 1;
-      if (O_redirect(tokens->tokens[tokens_length - 1]) != 0)
+    if (strcmp(tokens->tokens[num_tokens - 2], ">") == 0){
+      has_redirection = 1;
+      if (redirect_output_to_file(tokens->tokens[num_tokens - 1]) != 0)
         return 1;
     }
     // 需要重定向输入到文件
-    else if (strcmp(tokens->tokens[tokens_length - 2], "<") == 0){
-      is_redirected = 1;
-      if (I_redirect(tokens->tokens[tokens_length - 1]) != 0)
+    else if (strcmp(tokens->tokens[num_tokens - 2], "<") == 0){
+      has_redirection = 1;
+      if (redirect_input_from_file(tokens->tokens[num_tokens - 1]) != 0)
         return 1;
     }
   }
 
   // 创建子进程
-  pid_t pid = fork();
-  if (pid == -1) {
+  pid_t child_pid = fork();
+  if (child_pid == -1) {
     perror("Failed to create child process. Refer to...");
     return 1;
-  } else if (pid == 0) { // 子进程会执行的代码
-    // 设置子进程的进程组，使其成为新的进程组的领导者
+  } else if (child_pid == 0) { // 子进程执行的代码
+    // 设置子进程的进程组，使其成为新进程组的领导者
     setpgid(0, 0);
     // 设置信号处理方式
     signal(SIGINT, SIG_DFL);  // 默认行为：终止进程
     signal(SIGTSTP, SIG_DFL); // 默认行为：暂停进程
     signal(SIGTTOU, SIG_DFL); // 默认行为：暂停进程
 
-    // 创建一个新的字符串数组，用于传递给 execv
-    int argc = tokens->tokens_length;
-    if (is_redirected == 1) { // 若使用了输入输出重定向，则不传递最后两个参数
-      argc = argc - 2;
+    // 创建新的字符串数组用于传递给execv
+    int arg_count = tokens->tokens_length;
+    if (has_redirection == 1) { // 使用输入输出重定向时不传递最后两个参数
+      arg_count = arg_count - 2;
     }
-    char **argv = malloc((argc + 1) * sizeof(char *));
-    if (argv == NULL) {
+    char **argument_vector = malloc((arg_count + 1) * sizeof(char *));
+    if (argument_vector == NULL) {
       perror("Memory allocation error!");
       return 1;
     }
 
-    // 复制 tokens 中的字符串
-    for (size_t i = 0; i < argc; ++i) {
-      argv[i] = tokens->tokens[i];
+    // 复制tokens中的字符串
+    for (size_t i = 0; i < arg_count; ++i) {
+      argument_vector[i] = tokens->tokens[i];
     }
-    argv[argc] = NULL; // 数组结束标志符
+    argument_vector[arg_count] = NULL; // 数组结束标志
 
     // 在子进程中执行程序
-    execv(program_path, argv);
+    execv(executable_path, argument_vector);
 
-    // 以下代码仅在 execv 执行失败时被执行，用于退出子进程
+    // 以下代码仅在execv失败时执行，用于退出子进程
     perror("Failed to execute child process. Refer to...");
     exit(EXIT_FAILURE);
-  } else { // fork 返回的 pid 为正数，表示当前为父进程，pid 为子进程的 id
-    // 忽略 SIGINT 信号，让子进程处理该信号
+  } else { // fork返回正数，表示父进程，child_pid为子进程ID
+    // 忽略SIGINT信号，让子进程处理该信号
     signal(SIGINT, SIG_IGN);
 
     // 将子进程置于前台
-    tcsetpgrp(shell_terminal, pid);
+    tcsetpgrp(terminal_fd, child_pid);
 
     // 等待子进程完成
-    int status;
-    waitpid(pid, &status, 0);
+    int exit_status;
+    waitpid(child_pid, &exit_status, 0);
 
-    // 将前台进程组恢复为 Shell 的进程组
-    tcsetpgrp(shell_terminal, shell_pgid);
+    // 恢复前台进程组为Shell的进程组
+    tcsetpgrp(terminal_fd, shell_process_group);
 
-    // 恢复 SIGINT 的默认行为
+    // 恢复SIGINT的默认行为
     signal(SIGINT, SIG_DFL);
 
-    // 取消输入输出的重定向
-    reset_stdio();
+    // 取消输入输出重定向
+    restore_standard_io();
   }
-  // tcsetpgrp(shell_terminal, getpid());
-  reset_stdio();
+  // tcsetpgrp(terminal_fd, getpid());
+  restore_standard_io();
   return 0;
 }
 
-/* Looks up the built-in command, if it exists. */
-int lookup(char cmd[])
+/* 查找内置命令（如果存在） */
+int find_builtin_command(char cmd[])
 {
-  for (unsigned int i = 0; i < sizeof(cmd_table) / sizeof(fun_desc_t); i++)
-    if (cmd && (strcmp(cmd_table[i].cmd, cmd) == 0))
+  unsigned int i;
+  for (i = 0; i < sizeof(builtin_commands) / sizeof(command_descriptor_t); i++)
+    if (cmd && (strcmp(builtin_commands[i].command_name, cmd) == 0))
       return i;
   return -1;
 }
 
-/* Intialization procedures for this shell */
-void init_shell()
+/* shell的初始化过程 */
+void initialize_shell()
 {
-  /* Our shell is connected to standard input. */
-  shell_terminal = STDIN_FILENO;
+  /* shell连接到标准输入 */
+  terminal_fd = STDIN_FILENO;
 
   signal(SIGINT, SIG_DFL);
   signal(SIGTSTP, SIG_IGN);
   signal(SIGTTOU, SIG_IGN);
 
-  /* Check if we are running interactively */
-  shell_is_interactive = isatty(shell_terminal);
+  /* 检查是否以交互模式运行 */
+  is_interactive_mode = isatty(terminal_fd);
 
-  if (shell_is_interactive)
+  if (is_interactive_mode)
   {
-    /* If the shell is not currently in the foreground, we must pause the shell until it becomes a
-     * foreground process. We use SIGTTIN to pause the shell. When the shell gets moved to the
-     * foreground, we'll receive a SIGCONT. */
-    while (tcgetpgrp(shell_terminal) != (shell_pgid = getpgrp()))
-      kill(-shell_pgid, SIGTTIN);
+    /* 如果shell当前不在前台，必须暂停shell直到它成为前台进程。
+     * 使用SIGTTIN暂停shell。当shell移到前台时，会收到SIGCONT信号。 */
+    while (tcgetpgrp(terminal_fd) != (shell_process_group = getpgrp()))
+      kill(-shell_process_group, SIGTTIN);
 
-    /* Saves the shell's process id */
-    shell_pgid = getpid();
+    /* 保存shell的进程ID */
+    shell_process_group = getpid();
 
-    /* Take control of the terminal */
-    tcsetpgrp(shell_terminal, shell_pgid);
+    /* 控制终端 */
+    tcsetpgrp(terminal_fd, shell_process_group);
 
-    /* Save the current termios to a variable, so it can be restored later. */
-    tcgetattr(shell_terminal, &shell_tmodes);
+    /* 保存当前termios到变量，以便稍后恢复 */
+    tcgetattr(terminal_fd, &original_terminal_settings);
   }
 }
 
-int main(unused int argc, unused char *argv[])
+int main(UNUSED_PARAM int argc, UNUSED_PARAM char *argv[])
 {
-  init_shell();
+  initialize_shell();
 
-  static char line[4096];
-  int line_num = 0;
+  static char input_buffer[4096];
+  int prompt_number = 0;
 
-  /* Please only print shell prompts when standard input is not a tty */
-  if (shell_is_interactive)
-    fprintf(stdout, "%d: ", line_num);
+  /* 仅当标准输入不是tty时打印shell提示符 */
+  if (is_interactive_mode)
+    fprintf(stdout, "%d: ", prompt_number);
 
-  while (fgets(line, 4096, stdin)){
-    /* Split our line into words. */
-    struct tokens *tokens = tokenize(line);
+  while (fgets(input_buffer, 4096, stdin)){
+    /* 将输入行分割成单词 */
+    struct tokens *parsed_tokens = tokenize(input_buffer);
 
-    /* Find which built-in function to run. */
-    int fundex = lookup(tokens_get_token(tokens, 0));
+    /* 查找要运行的内置函数 */
+    int builtin_index = find_builtin_command(tokens_get_token(parsed_tokens, 0));
 
-    if (fundex >= 0){
-      cmd_table[fundex].fun(tokens);
+    if (builtin_index >= 0){
+      builtin_commands[builtin_index].function_ptr(parsed_tokens);
     }
     else{
-      /* REPLACE this to run commands as programs. */
+      /* 替换此部分以程序方式运行命令 */
       // fprintf(stdout, "This shell doesn't know how to run programs.\n");
-      cmd_run_prog(tokens);
+      execute_external_program(parsed_tokens);
     }
-    if (shell_is_interactive){
-      /* Please only print shell prompts when standard input is not a tty */
-      fprintf(stdout, "%d: ", ++line_num);
+    if (is_interactive_mode){
+      /* 仅当标准输入不是tty时打印shell提示符 */
+      fprintf(stdout, "%d: ", ++prompt_number);
     }
-    /* Clean up memory */
-    tokens_destroy(tokens);
+    /* 清理内存 */
+    tokens_destroy(parsed_tokens);
   }
 
   return 0;
