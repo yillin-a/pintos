@@ -22,10 +22,12 @@ struct dir_entry {
 /* Creates a directory with space for ENTRY_CNT entries in the
    given SECTOR.  Returns true if successful, false on failure. */
 bool dir_create(block_sector_t sector, size_t entry_cnt) {
-  /* 修改：传递 true 给 is_dir 参数 */
+  /* 参数 true 表示创建目录 */
   return inode_create(sector, entry_cnt * sizeof(struct dir_entry), true);
 }
 
+/* Opens and returns the directory for the given INODE, of which
+   it takes ownership.  Returns a null pointer on failure. */
 struct dir* dir_open(struct inode* inode) {
   struct dir* dir = calloc(1, sizeof *dir);
   if (inode != NULL && dir != NULL) {
@@ -39,14 +41,19 @@ struct dir* dir_open(struct inode* inode) {
   }
 }
 
+/* Opens the root directory and returns a directory for it.
+   Return true if successful, false on failure. */
 struct dir* dir_open_root(void) {
   return dir_open(inode_open(ROOT_DIR_SECTOR));
 }
 
+/* Opens and returns a new directory for the same inode as DIR.
+   Returns a null pointer on failure. */
 struct dir* dir_reopen(struct dir* dir) {
   return dir_open(inode_reopen(dir->inode));
 }
 
+/* Destroys DIR and frees associated resources. */
 void dir_close(struct dir* dir) {
   if (dir != NULL) {
     inode_close(dir->inode);
@@ -54,10 +61,12 @@ void dir_close(struct dir* dir) {
   }
 }
 
+/* Returns the inode encapsulated by DIR. */
 struct inode* dir_get_inode(struct dir* dir) {
   return dir->inode;
 }
 
+/* Searches DIR for a file with the given NAME. */
 static bool lookup(const struct dir* dir, const char* name, struct dir_entry* ep, off_t* ofsp) {
   struct dir_entry e;
   size_t ofs;
@@ -76,6 +85,7 @@ static bool lookup(const struct dir* dir, const char* name, struct dir_entry* ep
   return false;
 }
 
+/* Searches DIR for a file with the given NAME. */
 bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
   struct dir_entry e;
 
@@ -90,6 +100,7 @@ bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
   return *inode != NULL;
 }
 
+/* Adds a file named NAME to DIR. */
 bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
   struct dir_entry e;
   off_t ofs;
@@ -98,16 +109,20 @@ bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
+  /* Check NAME for validity. */
   if (*name == '\0' || strlen(name) > NAME_MAX)
     return false;
 
+  /* Check that NAME is not in use. */
   if (lookup(dir, name, NULL, NULL))
     goto done;
 
+  /* Set OFS to offset of free slot. */
   for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e)
     if (!e.in_use)
       break;
 
+  /* Write slot. */
   e.in_use = true;
   strlcpy(e.name, name, sizeof e.name);
   e.inode_sector = inode_sector;
@@ -117,8 +132,7 @@ done:
   return success;
 }
 
-/* 原始的 remove 功能被保留，但需要调用者确保逻辑正确。
-   我们在 filesys_remove 中处理复杂逻辑，但也可以在这里加防线 */
+/* Removes any entry for NAME in DIR. */
 bool dir_remove(struct dir* dir, const char* name) {
   struct dir_entry e;
   struct inode* inode = NULL;
@@ -128,36 +142,32 @@ bool dir_remove(struct dir* dir, const char* name) {
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
+  /* Find directory entry. */
   if (!lookup(dir, name, &e, &ofs))
     goto done;
 
+  /* Open inode. */
   inode = inode_open(e.inode_sector);
   if (inode == NULL)
     goto done;
-    
-  /* 新增：如果删除的是目录，必须确保为空 */
+
+  /* 如果是目录，必须确保为空 */
   if (inode_is_dir(inode)) {
       struct dir* target = dir_open(inode);
       bool empty = dir_is_empty(target);
-      dir_close(target); // 关闭 target dir wrapper，但 inode 因为被上面 inode_open 引用了，所以这里只是关掉视图
-      /* 注意：dir_close 内部会 inode_close。我们需要确保 inode 仍然有效或者重新 open */
-      /* Pintos 的 dir_close 会做 inode_close。所以上面的逻辑会导致 inode 引用计数减1。
-         为了安全，dir_open 会增加引用计数，dir_close 减少。
-         所以 target = dir_open(inode) 会调用 inode_reopen(inode)，计数+1。
-         dir_close(target) 计数-1。
-         原始 inode 变量保持不变。逻辑是安全的。
-      */
+      dir_close(target); // 关闭 target view，inode 仍被外层 open 持有引用
       
       if (!empty) {
-          /* 目录不为空，无法删除 */
           goto done; 
       }
   }
 
+  /* Erase directory entry. */
   e.in_use = false;
   if (inode_write_at(dir->inode, &e, sizeof e, ofs) != sizeof e)
     goto done;
 
+  /* Remove inode. */
   inode_remove(inode);
   success = true;
 
@@ -166,12 +176,13 @@ done:
   return success;
 }
 
+/* Reads the next directory entry in DIR. */
 bool dir_readdir(struct dir* dir, char name[NAME_MAX + 1]) {
   struct dir_entry e;
 
   while (inode_read_at(dir->inode, &e, sizeof e, dir->pos) == sizeof e) {
     dir->pos += sizeof e;
-    /* 忽略 . 和 ..，使得 ls 命令不显示它们，或者根据需求决定 */
+    /* 忽略 . 和 .. */
     if (e.in_use && strcmp(e.name, ".") != 0 && strcmp(e.name, "..") != 0) {
       strlcpy(name, e.name, NAME_MAX + 1);
       return true;
@@ -180,7 +191,7 @@ bool dir_readdir(struct dir* dir, char name[NAME_MAX + 1]) {
   return false;
 }
 
-/* 新增实现：检查目录是否为空 */
+/* 检查目录是否为空 */
 bool dir_is_empty(struct dir* dir) {
   struct dir_entry e;
   off_t ofs;
@@ -193,4 +204,16 @@ bool dir_is_empty(struct dir* dir) {
     }
   }
   return true;
+}
+
+/* 设置目录读取位置 */
+void dir_seek(struct dir* dir, off_t pos) {
+  ASSERT(dir != NULL);
+  dir->pos = pos;
+}
+
+/* 获取目录读取位置 */
+off_t dir_tell(struct dir* dir) {
+  ASSERT(dir != NULL);
+  return dir->pos;
 }

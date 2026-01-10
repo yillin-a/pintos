@@ -4,8 +4,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "devices/block.h"
+#include "filesys/off_t.h"
 
-/* Maximum length of a file name component. */
+/* Maximum length of a file name component.
+   This is the traditional UNIX maximum length.
+   After directories are implemented, this maximum length may be
+   retained, but much longer full path names must be allowed. */
 #define NAME_MAX 14
 
 struct inode;
@@ -24,7 +28,11 @@ bool dir_add(struct dir*, const char* name, block_sector_t);
 bool dir_remove(struct dir*, const char* name);
 bool dir_readdir(struct dir*, char name[NAME_MAX + 1]);
 
-/* 新增：判断目录是否为空（除了 . 和 ..） */
+/* 新增：判断目录是否为空 */
 bool dir_is_empty(struct dir* dir);
+
+/* 新增：目录指针操作 */
+void dir_seek(struct dir* dir, off_t pos);
+off_t dir_tell(struct dir* dir);
 
 #endif /* filesys/directory.h */
