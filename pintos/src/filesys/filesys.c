@@ -18,8 +18,10 @@ static void do_format(void);
    功能：给定路径 path，找到其父目录，并返回文件名。
    返回：父目录的 struct dir*。如果失败返回 NULL。
    副作用：file_name 被填充为路径的最后一部分。
+   
+   修改：添加 static 关键字
 */
-struct dir* parse_path(const char* path_orig, char* file_name) {
+static struct dir* parse_path(const char* path_orig, char* file_name) {
   struct dir* dir;
   
   if (path_orig == NULL || strlen(path_orig) == 0)
@@ -186,7 +188,7 @@ bool filesys_remove(const char* name) {
 }
 
 bool filesys_chdir(const char* name) {
-  struct dir* dir = NULL;
+  /* 修复：删除未使用的变量 'dir' */
   char file_name[NAME_MAX + 1];
   
   /* 解析路径 */

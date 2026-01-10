@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "filesys/directory.h" /* 新增：用于 dir_reopen, dir_close */
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -141,7 +142,8 @@ void thread_tick(void) {
   if (t == idle_thread)
     idle_ticks++;
 #ifdef USERPROG
-  else if (t->pcb != NULL)
+  /* 修复：改为检查 pagedir，因为 thread.h 中没有 pcb */
+  else if (t->pagedir != NULL)
     user_ticks++;
 #endif
   else
@@ -190,6 +192,15 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   /* Initialize thread. */
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
+
+  /* 新增：继承父线程的当前工作目录 */
+  {
+      struct thread *cur = thread_current();
+      if (cur->cwd != NULL) {
+          t->cwd = dir_reopen(cur->cwd);
+      }
+      /* 注意：init_thread 已将 t 清零，所以如果父线程 cwd 为 NULL，t->cwd 也是 NULL */
+  }
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame(t, sizeof *kf);
@@ -299,6 +310,12 @@ tid_t thread_tid(void) { return thread_current()->tid; }
    returns to the caller. */
 void thread_exit(void) {
   ASSERT(!intr_context());
+
+  /* 新增：关闭当前工作目录，防止内存泄漏 */
+  if (thread_current()->cwd != NULL) {
+      dir_close(thread_current()->cwd);
+      thread_current()->cwd = NULL;
+  }
 
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
@@ -440,10 +457,14 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   strlcpy(t->name, name, sizeof t->name);
   t->stack = (uint8_t*)t + PGSIZE;
   t->priority = priority;
-  //t->pcb = NULL;
+  
+  /* 修复：移除 pcb 初始化，因为 thread.h 中没有该成员 */
+  /*
   #ifdef USERPROG
     t->pcb = NULL;
   #endif
+  */
+  
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable();
