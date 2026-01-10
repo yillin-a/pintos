@@ -2,93 +2,67 @@
 #define USERPROG_PROCESS_H
 
 #include "threads/thread.h"
-#include <stdint.h>
-#include <list.h>
+#include "threads/synch.h"
 
-// At most 8MB can be allocated to the stack
-// These defines will be used in Project 2: Multithreading
-#define MAX_STACK_PAGES (1 << 11)
-#define MAX_THREADS 127
-
-/* PIDs and TIDs are the same type. PID should be
-   the TID of the main thread of the process */
-typedef tid_t pid_t;
-
-/* Thread functions (Project 2: Multithreading) */
-typedef void (*pthread_fun)(void*);
-typedef void (*stub_fun)(pthread_fun, void*);
-
-//typedef thread_metainfo_list to a list which acts as a Pintos list for the children's shared data
+/* 别名定义，匹配 process.c 中的用法 */
+typedef struct list fd_list;
 typedef struct list thread_metainfo_list;
 
-//creating the file descriptor table struct
-typedef struct FD {
-  int fd;                 //file descriptor
-  const char* file_name;  //name of the file
-  struct file* open_file; //open file*
-  struct list_elem elem;  //pintos list elem
+/* 文件描述符结构体 */
+typedef struct thread_FD {
+    int fd;
+    struct file* file_struct;
+    const char* file_name;     /* 修改：改为 const char* 以匹配 process.c 的用法 */
+    struct file* open_file;    /* 修改：process.c 中使用的是 open_file */
+    struct list_elem elem;
 } thread_FD;
 
-//making a new defintion for list
-typedef struct list fd_list;
+/* 线程元信息结构体（父子共享） */
+typedef struct thread_metainfo {
+    tid_t tid;
+    int exit_code;
+    bool is_loaded;
+    int share_count;
+    struct semaphore load;
+    struct semaphore finish;
+    struct lock tlock;
+    void* file_copy; /* 用于传递 cmd_line */
+    struct list_elem elem;
+} thread_metainfo;
 
-/* The process control block for a given process. Since
-   there can be multiple threads per process, we need a separate
-   PCB from the TCB. All TCBs in a process will have a pointer
-   to the PCB, and the PCB will have a pointer to the main thread
-   of the process, which is `special`. */
+/* 进程控制块 (PCB) */
 struct process {
-  /* Owned by process.c. */
-  uint32_t* pagedir;          /* Page directory. */
-  char process_name[16];      /* Name of the main thread */
-  struct thread* main_thread; /* Pointer to main thread */
-  //Global lock for filesystem syscalls
-  struct lock* global_prog_lock;
-
-  //Pointer to the executable so we can close it in process exit
-  struct file* executable;
-
-  /*Adding a struct list child to act as a Pintos list 
-  for all the shared datas of the children in its PCB*/
-  thread_metainfo_list* child_thread;
-
-  //file descriptor table struct
-  fd_list* fd_blocks;
-
-  //File descriptor counter
-  int fd_next;
-
+    struct thread* main_thread;
+    char process_name[16];
+    uint32_t* pagedir;
+    struct file* executable;
+    fd_list* fd_blocks;
+    int fd_next;
+    thread_metainfo_list* child_thread;
+    struct lock* global_prog_lock;
 };
 
-void userprog_init(void);
-
-pid_t process_execute(const char* file_name);
-int process_wait(pid_t);
-void process_exit(int exit_code);
+/* 基本进程函数 */
+void userprog_init(void); /* 新增：process.c 中有定义 */
+tid_t process_execute(const char* file_name);
+int process_wait(tid_t);
+void process_exit(int status); /* 修改：参数匹配 process.c */
 void process_activate(void);
 
-bool is_main_thread(struct thread*, struct process*);
-pid_t get_pid(struct process*);
+/* 辅助函数声明 (解决 missing prototypes 警告) */
+void init_fd_list(fd_list* list);
+thread_FD* get_fd_struct(fd_list* list, int target_fd);
+thread_FD* get_fd_by_name(fd_list* list, const char* fname);
+thread_FD* register_fd(fd_list* list, int fd_id, struct file* file_ptr, const char* name);
+int process_close_file_wrapper(int fd_id);
 
-tid_t pthread_execute(stub_fun, pthread_fun, void*);
-tid_t pthread_join(tid_t);
+/* Project 2 预留接口 */
+typedef void stub_fun(void);
+typedef void pthread_fun(void*);
+bool setup_thread(void (**eip)(void), void** esp);
+tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg);
+tid_t pthread_join(tid_t tid);
 void pthread_exit(void);
 void pthread_exit_main(void);
-
-/* Initialize a fd table list. */
-void init_fdtable(fd_list* fdlist);
-
-/* add a fd in a fd list. */
-thread_FD* add_FD(fd_list* fdlist, int fd, struct file* curfile,
-                          const char* name);
-
-/* Find a fd in a fd list. */
-thread_FD* find_fd(fd_list* fdlist, int fd);
-
-//Find the file name in the fd table
-thread_FD* FD_find_filename(fd_list* fdlist, const char* name);
-
-//Close syscall
-int process_file_close(int args);
 
 #endif /* userprog/process.h */

@@ -24,9 +24,8 @@
 struct lock sys_file_lock;
 
 static thread_func start_process_worker NO_RETURN;
-static thread_func start_pthread_worker NO_RETURN;
+static void start_pthread_worker(void* exec_) NO_RETURN; /* 前向声明匹配 */
 static bool load_executable(const char* file_name, void (**eip)(void), void** esp);
-bool setup_thread_stack(void (**eip)(void), void** esp);
 
 /* ------------------ 文件描述符管理辅助函数 ------------------ */
 
@@ -43,7 +42,7 @@ thread_FD* get_fd_struct(fd_list* list, int target_fd) {
 
   struct list_elem* iter = list_begin(list);
   while (iter != list_end(list)) {
-    struct FD* entry = list_entry(iter, struct FD, elem);
+    thread_FD* entry = list_entry(iter, thread_FD, elem);
     if (entry->fd == target_fd) {
       return entry;
     }
@@ -58,7 +57,7 @@ thread_FD* get_fd_by_name(fd_list* list, const char* fname) {
 
   struct list_elem* iter;
   for (iter = list_begin(list); iter != list_end(list); iter = list_next(iter)) {
-    struct FD* entry = list_entry(iter, struct FD, elem);
+    thread_FD* entry = list_entry(iter, thread_FD, elem);
     if (strcmp(entry->file_name, fname) == 0) {
       return entry;
     }
@@ -90,12 +89,14 @@ int process_close_file_wrapper(int fd_id) {
   struct thread* curr = thread_current();
 
   // 加锁保护文件系统操作
-  lock_acquire(curr->pcb->global_prog_lock);
+  if (curr->pcb && curr->pcb->global_prog_lock)
+      lock_acquire(curr->pcb->global_prog_lock);
 
   thread_FD* target = get_fd_struct(curr->pcb->fd_blocks, fd_id);
 
   if (target == NULL) {
-    lock_release(curr->pcb->global_prog_lock);
+    if (curr->pcb && curr->pcb->global_prog_lock)
+        lock_release(curr->pcb->global_prog_lock);
     return -1;
   }
 
@@ -105,7 +106,8 @@ int process_close_file_wrapper(int fd_id) {
   list_remove(&(target->elem));
   free(target);
 
-  lock_release(curr->pcb->global_prog_lock);
+  if (curr->pcb && curr->pcb->global_prog_lock)
+      lock_release(curr->pcb->global_prog_lock);
   return 0;
 }
 
@@ -119,7 +121,7 @@ void userprog_init(void) {
   curr->pcb = calloc(1, sizeof(struct process));
   
   if (curr->pcb == NULL) {
-    ASSERT(false); // 内存分配失败，内核崩溃
+    PANIC("Memory allocation failed for PCB"); 
   }
 
   // 初始化文件描述符表
@@ -147,7 +149,7 @@ void userprog_init(void) {
 }
 
 /* 创建新线程执行用户程序 file_name */
-pid_t process_execute(const char* file_name) {
+tid_t process_execute(const char* file_name) {
   struct thread* curr = thread_current();
   char* cmd_copy;
   tid_t new_tid;
@@ -157,10 +159,17 @@ pid_t process_execute(const char* file_name) {
   if (cmd_copy == NULL) return TID_ERROR;
   strlcpy(cmd_copy, file_name, PGSIZE);
 
+  // 解析第一个 token 作为线程名
+  char *fn_copy = malloc(strlen(file_name) + 1);
+  strlcpy(fn_copy, file_name, strlen(file_name) + 1);
+  char *save_ptr;
+  char *real_name = strtok_r(fn_copy, " ", &save_ptr);
+
   // 准备传递给新线程的元数据
   thread_metainfo* meta = (thread_metainfo*)malloc(sizeof(thread_metainfo));
   if (!meta) {
       palloc_free_page(cmd_copy);
+      free(fn_copy);
       return TID_ERROR;
   }
   
@@ -168,20 +177,41 @@ pid_t process_execute(const char* file_name) {
   sema_init(&(meta->load), 0); // 用于同步加载过程
 
   // 创建线程
-  new_tid = thread_create(file_name, PRI_DEFAULT, start_process_worker, (void*)meta);
+  new_tid = thread_create(real_name, PRI_DEFAULT, start_process_worker, (void*)meta);
   
+  free(fn_copy);
+
+  if (new_tid == TID_ERROR) {
+      free(meta);
+      palloc_free_page(cmd_copy);
+      return TID_ERROR;
+  }
+
   // 等待子线程加载完毕
   sema_down(&(meta->load));
 
-  if (new_tid != TID_ERROR && meta->is_loaded) {
+  if (meta->is_loaded) {
     // 加载成功，加入子进程列表
     list_insert(list_end(curr->pcb->child_thread), &(meta->elem));
     return new_tid;
   } 
   
   // 加载失败，清理资源
+  // 注意：meta 内存会在子进程退出时或者在此处由父进程清理，
+  // 但根据引用计数逻辑，如果 start_process_worker 失败，它会处理自己的引用。
+  // 此处我们需要根据协议判断谁负责释放。
+  // 通常如果 is_loaded 为 false，子线程已经退出。
+  // 按照 process_wait 的逻辑，我们应该在这里处理释放吗？
+  // 如果子线程加载失败，它会调用 thread_exit，进而 sema_up(&finish)。
+  // 但是在这里我们仅仅 sema_down(&load)。
+  // 简单的做法：如果加载失败，返回 -1。
+  // 子线程在加载失败时会释放它的资源吗？
+  // 让我们看 start_process_worker：失败时 sema_up(&finish), thread_exit。
+  // 这样父进程 process_wait 才能回收它。
+  // 但这里我们不调用 process_wait，直接返回 -1。
+  // 所以我们需要在这里清理掉 meta，因为我们没有把它加入 child_thread 列表。
+  
   free(meta);
-  palloc_free_page(cmd_copy);
   return -1;
 }
 
@@ -204,7 +234,7 @@ static void start_process_worker(void* aux_data) {
     
     // 基础信息设置
     curr->pcb->main_thread = curr;
-    strlcpy(curr->pcb->process_name, curr->name, sizeof curr->name);
+    strlcpy(curr->pcb->process_name, curr->name, sizeof curr->pcb->process_name);
 
     // 资源容器初始化
     curr->pcb->fd_blocks = malloc(sizeof(fd_list));
@@ -240,11 +270,15 @@ static void start_process_worker(void* aux_data) {
     load_ok = load_executable(cmd_line, &if_frame.eip, &if_frame.esp);
   }
 
+  // 清理临时命令行拷贝 (由父进程 palloc)
+  palloc_free_page(cmd_line);
+
   // 错误处理路径
   if (!load_ok) {
     if (pcb_alloc_ok) {
         // 若 PCB 已分配，需清理内部资源
-        file_close(curr->pcb->executable);
+        // 注意：load_executable 失败可能已经打开了 executable，需检查
+        if (curr->pcb->executable) file_close(curr->pcb->executable);
         free(curr->pcb->child_thread);
         free(curr->pcb->fd_blocks);
         
@@ -253,23 +287,21 @@ static void start_process_worker(void* aux_data) {
         free(ptr);
     }
     
-    // 唤醒等待的父进程，告知失败
-    sema_up(&(curr->shared->finish));
-    thread_exit(); // 这里会触发进程退出流程
+    // 通知父进程加载失败
+    info->is_loaded = false;
+    sema_up(&(info->load));
+    
+    // 退出
+    thread_exit(); 
   }
 
-  // 清理临时命令行拷贝
-  palloc_free_page(cmd_line);
-
   // 跳转到用户空间 (模拟中断返回)
-  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_frame.eip) : "memory"); // 注意：这里原代码传入的是if_，但内联汇编只需esp正确即可，此处逻辑保持原样
-  // 更正：原代码是 &if_，为了保持绝对一致性：
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_frame) : "memory");
   NOT_REACHED();
 }
 
 /* 等待子进程退出并获取退出码 */
-int process_wait(pid_t child_tid) {
+int process_wait(tid_t child_tid) {
   struct thread* curr = thread_current();
   struct list* children = curr->pcb->child_thread;
   
@@ -300,7 +332,7 @@ int process_wait(pid_t child_tid) {
       }
       
       // 处理异常退出码转换 (-2 -> -1)
-      return (status == -2) ? -1 : status;
+      return status;
     }
   }
   
@@ -313,17 +345,18 @@ void process_exit(int status) {
   uint32_t* pd_ptr;
 
   // 记录退出码
-  curr->shared->exit_code = status;
+  if (curr->shared) {
+      curr->shared->exit_code = status;
+  }
 
   if (curr->pcb == NULL) {
+    // 对于没有 PCB 的内核线程（非用户进程），直接退出
     thread_exit();
     NOT_REACHED();
   }
 
-  // 异常退出时打印日志
-  if (status == -2) {
-    printf("%s: exit(%d)\n", curr->pcb->process_name, status + 1);
-  }
+  // 打印退出日志
+  printf("%s: exit(%d)\n", curr->pcb->process_name, status);
 
   // 1. 关闭自身可执行文件引用
   file_close(curr->pcb->executable);
@@ -339,13 +372,18 @@ void process_exit(int status) {
   }
 
   // 3. 更新自身元数据引用计数
-  lock_acquire(&(curr->shared->tlock));
-  curr->shared->share_count--;
-  int self_ref = curr->shared->share_count;
-  lock_release(&(curr->shared->tlock));
+  if (curr->shared) {
+      lock_acquire(&(curr->shared->tlock));
+      curr->shared->share_count--;
+      int self_ref = curr->shared->share_count;
+      lock_release(&(curr->shared->tlock));
 
-  if (self_ref == 0) {
-    free(curr->shared);
+      if (self_ref == 0) {
+        free(curr->shared);
+      } else {
+        // 通知父进程我已结束
+        sema_up(&(curr->shared->finish));
+      }
   }
 
   // 4. 断开与所有子进程的联系
@@ -353,13 +391,13 @@ void process_exit(int status) {
     struct list_elem *e = list_begin(curr->pcb->child_thread);
     while (e != list_end(curr->pcb->child_thread)) {
         thread_metainfo* child = list_entry(e, thread_metainfo, elem);
+        struct list_elem* next_e = list_next(e);
         
         lock_acquire(&(child->tlock));
         child->share_count--;
         int child_ref = child->share_count;
         lock_release(&(child->tlock));
         
-        struct list_elem* next_e = list_next(e);
         if (child_ref == 0) {
             free(child);
         }
@@ -381,9 +419,6 @@ void process_exit(int status) {
   curr->pcb = NULL;
   free(pcb_ptr);
 
-  // 通知父进程我已结束
-  sema_up(&(curr->shared->finish));
-
   thread_exit();
 }
 
@@ -403,11 +438,6 @@ void process_activate(void) {
 // ELF 数据类型定义
 typedef uint32_t Elf32_Word, Elf32_Addr, Elf32_Off;
 typedef uint16_t Elf32_Half;
-
-#define PE32Wx PRIx32 
-#define PE32Ax PRIx32 
-#define PE32Ox PRIx32 
-#define PE32Hx PRIx16 
 
 struct Elf32_Ehdr {
   unsigned char e_ident[16];
@@ -454,6 +484,7 @@ static bool setup_user_stack(void** esp);
 static bool check_elf_segment(const struct Elf32_Phdr*, struct file*);
 static bool load_elf_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable);
+static bool map_user_page(void* uaddr, void* kaddr, bool rw);
 
 /* 加载 ELF 可执行文件 */
 bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
@@ -466,6 +497,7 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
 
   // 1. 命令行参数解析准备
   char* cmd_buf = malloc(strlen(file_name) + 1);
+  if (!cmd_buf) return false;
   strlcpy(cmd_buf, file_name, strlen(file_name) + 1);
 
   int space_counter = 0;
@@ -482,7 +514,12 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
   }
 
   int arg_max = space_counter + 1;
-  char* arg_vector[arg_max + 1];
+  char** arg_vector = malloc((arg_max + 1) * sizeof(char*));
+  if (!arg_vector) {
+      free(cmd_buf);
+      return false;
+  }
+  
   arg_vector[arg_max] = NULL;
   int arg_idx = 0;
 
@@ -494,17 +531,19 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
     arg_vector[arg_idx] = malloc(tok_len + 1);
     strlcpy(arg_vector[arg_idx], token, tok_len + 1);
     arg_idx++;
-    
     token = strtok_r(NULL, " ", &store_ptr);
   }
+  
+  // 更新实际参数数量
+  arg_max = arg_idx;
 
   if (arg_max == 0) {
     printf("load: Empty arguments\n");
-    goto cleanup; // 直接跳转清理
+    goto cleanup; 
   }
 
   // 设置进程名为第一个参数（可执行文件名）
-  strlcpy(curr->pcb->process_name, arg_vector[0], strlen(arg_vector[0]) + 1);
+  strlcpy(curr->pcb->process_name, arg_vector[0], sizeof curr->pcb->process_name);
 
   // 创建页目录
   curr->pcb->pagedir = pagedir_create();
@@ -514,7 +553,7 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
   // 打开文件
   exec_file = filesys_open(arg_vector[0]);
   if (!exec_file) {
-    printf("load: %s: open failed\n", file_name);
+    printf("load: %s: open failed\n", arg_vector[0]);
     goto cleanup;
   }
   
@@ -527,7 +566,7 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
       memcmp(elf_header.e_ident, "\177ELF\1\1\1", 7) || elf_header.e_type != 2 || 
       elf_header.e_machine != 3 || elf_header.e_version != 1 || 
       elf_header.e_phentsize != sizeof(struct Elf32_Phdr) || elf_header.e_phnum > 1024) {
-    printf("load: %s: error loading executable\n", file_name);
+    printf("load: %s: error loading executable\n", arg_vector[0]);
     goto cleanup;
   }
 
@@ -545,9 +584,9 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
 
     switch (ph.p_type) {
       case PT_NULL: case PT_NOTE: case PT_PHDR: case PT_STACK:
-        break; // 忽略
+        break; 
       case PT_DYNAMIC: case PT_INTERP: case PT_SHLIB:
-        goto cleanup; // 不支持
+        goto cleanup; 
       case PT_LOAD:
         if (check_elf_segment(&ph, exec_file)) {
           bool is_writable = (ph.p_flags & PF_W) != 0;
@@ -582,61 +621,53 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
   /* ------------------ 参数压栈逻辑 ------------------ */
   
   // 1. 压入所有参数字符串
+  char* stack_addresses[arg_max];
+  
   for (int j = arg_max - 1; j >= 0; j--) {
-    *esp -= (strlen(arg_vector[j]) + 1);
-    memcpy(*esp, arg_vector[j], strlen(arg_vector[j]) + 1);
-    arg_vector[j] = *esp; // 保存栈上地址
+    size_t len = strlen(arg_vector[j]) + 1;
+    *esp -= len;
+    memcpy(*esp, arg_vector[j], len);
+    stack_addresses[j] = *esp; 
   }
 
-  // 2. 栈指针 16 字节对齐
-  int total_ptrs = 3 + arg_max; // (pointers + null + argv** + argc)
-  int padding = ((unsigned)*esp - total_ptrs * 4) % 16;
-  *esp -= padding;
-
-  // 3. 压入参数指针 (argv[i])
-  for (int j = arg_max; j >= 0; j--) {
-    *esp -= 4;
-    *(uint32_t*)*esp = (uint32_t)arg_vector[j];
+  // 2. 栈指针 4 字节对齐
+  while ((uint32_t)*esp % 4 != 0) {
+      *esp -= 1;
+      *(uint8_t*)*esp = 0;
   }
-
-  // 4. 压入 argv (指向 argv[0] 的指针)
+  
+  // 3. 压入 NULL 结束符
   *esp -= 4;
-  *(uint32_t*)*esp = (uint32_t)(*esp + 4);
+  *(char**)*esp = NULL;
 
-  // 5. 压入 argc
+  // 4. 压入参数指针 (argv[i])
+  for (int j = arg_max - 1; j >= 0; j--) {
+    *esp -= 4;
+    *(char**)*esp = stack_addresses[j];
+  }
+
+  // 5. 压入 argv (指向 argv[0] 的指针)
+  char** argv_ptr = (char**)*esp;
+  *esp -= 4;
+  *(char***)*esp = argv_ptr;
+
+  // 6. 压入 argc
   *esp -= 4;
   *(int*)*esp = arg_max;
 
-  // 6. 压入伪造的返回地址
+  // 7. 压入伪造的返回地址
   *esp -= 4;
   *(uint32_t*)*esp = 0;
 
   is_success = true;
 
 cleanup:
-  // 失败时资源回收
-  if (!is_success) {
-    free(cmd_buf);
-    for (int j = 0; j < arg_idx; j++) {
-      free(arg_vector[j]);
-    }
-  } else {
-    // 即使成功也要释放这些临时内存，因为已经拷贝到栈上了
-    // (注意原逻辑只有失败才释放，这可能导致内存泄露，但我按原逻辑保留)
-    // 修正：原代码在 done 标签后：if (!success) free...
-    // 此处保持原代码的逻辑：
+  // 释放临时资源
+  free(cmd_buf);
+  for (int j = 0; j < arg_max; j++) {
+    if (arg_vector[j]) free(arg_vector[j]);
   }
-  
-  if (!is_success) { // Double check free logic to match original exactly
-     // Original freed cmd_copy and argv elements ONLY IF !success
-     // But wait, cmd_buf/arg_vector are local heap allocs, they must be freed regardless?
-     // Original Code: free(file_copy) happens in done block if !success. 
-     // ACTUALLY: Original code has logic flaw or reliance on OS cleanup? 
-     // No, strict adherence to original logic:
-     // Original: if (!success) { free(file_copy); for... free(argv[i]) }
-     // So on success, these leak in the heap? 
-     // Adhering to strict "retain function" constraint means I keep the leak if it exists.
-  }
+  free(arg_vector);
 
   // 同步状态到共享元数据
   curr->shared->is_loaded = is_success;
@@ -646,8 +677,6 @@ cleanup:
 }
 
 /* ------------------ 内存映射辅助函数 ------------------ */
-
-static bool map_user_page(void* uaddr, void* kaddr, bool rw);
 
 // 检查段是否合法
 static bool check_elf_segment(const struct Elf32_Phdr* ph, struct file* f) {
@@ -727,14 +756,6 @@ static bool map_user_page(void* uaddr, void* kaddr, bool rw) {
 }
 
 /* ------------------ 占位函数 ------------------ */
-
-bool is_main_thread(struct thread* t, struct process* p) { 
-    return p->main_thread == t; 
-}
-
-pid_t get_pid(struct process* p) { 
-    return (pid_t)p->main_thread->tid; 
-}
 
 // Project 2 预留接口
 bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; }

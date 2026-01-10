@@ -14,8 +14,7 @@ enum thread_status {
   THREAD_DYING    /* About to be destroyed. */
 };
 
-/* Thread identifier type.
-   You can redefine this to whatever type you like. */
+/* Thread identifier type. */
 typedef int tid_t;
 #define TID_ERROR ((tid_t)-1) /* Error value for tid_t. */
 
@@ -24,8 +23,7 @@ typedef int tid_t;
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
 
-/* Scheduler policies. 
-   新增：定义调度策略枚举，供 init.c 和 thread.c 使用 */
+/* Scheduler policies. */
 enum sched_policy {
   SCHED_FIFO,
   SCHED_PRIO,
@@ -33,49 +31,15 @@ enum sched_policy {
   SCHED_MLFQS
 };
 
-/* 新增：定义默认调度策略 */
+/* Default scheduler policy. */
 #define SCHED_DEFAULT SCHED_FIFO
 
-/* 前向声明 struct dir，避免循环引用 */
+/* Forward declarations. */
 struct dir;
+struct process;
+struct thread_metainfo;
 
-/* A kernel thread or user process.
-   Each thread structure is stored in its own 4 kB page.  The
-   thread structure itself sits at the very bottom of the page
-   (at offset 0).  The rest of the page is reserved for the
-   thread's kernel stack, which grows downward from the top of
-   the page (at offset 4 kB).  Here's an illustration:
-
-        4 kB +---------------------------------+
-             |          kernel stack           |
-             |                |                |
-             |                |                |
-             |                V                |
-             |         grows downward          |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             |                                 |
-             +---------------------------------+
-             |              magic              |
-             |                :                |
-             |                :                |
-             |               name              |
-             |              status             |
-        0 kB +---------------------------------+
-
-   The upshot of this is that two things are very important:
-
-   1. The only way to find out the stack of the currently running
-      thread is to read the CPU's stack pointer.
-
-   2. The only way to find out the currently running thread is to
-      read the stack pointer, round it down to the nearest 4 kB
-      boundary, and cast the result to a `struct thread *`. */
+/* A kernel thread or user process. */
 struct thread {
   /* Owned by thread.c. */
   tid_t tid;                 /* Thread identifier. */
@@ -90,7 +54,8 @@ struct thread {
 
 #ifdef USERPROG
   /* Owned by userprog/process.c. */
-  uint32_t* pagedir; /* Page directory. */
+  struct process* pcb;            /* Process Control Block. */
+  struct thread_metainfo* shared; /* Shared info between parent and child. */
 #endif
 
   /* Owned by filesys/filesys.c. */
@@ -100,12 +65,8 @@ struct thread {
   unsigned magic; /* Detects stack overflow. */
 };
 
-/* If false (default), use round-robin scheduler.
-   If true, use multi-level feedback queue scheduler.
-   Controlled by kernel command-line option "-o mlfqs". */
+/* Scheduler globals. */
 extern bool thread_mlfqs;
-
-/* 新增：声明当前激活的调度策略变量 */
 extern enum sched_policy active_sched_policy;
 
 void thread_init(void);
@@ -127,7 +88,6 @@ const char* thread_name(void);
 void thread_exit(void) NO_RETURN;
 void thread_yield(void);
 
-/* Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func(struct thread* t, void* aux);
 void thread_foreach(thread_action_func*, void*);
 
