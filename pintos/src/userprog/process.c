@@ -24,7 +24,7 @@
 struct lock sys_file_lock;
 
 static thread_func start_process_worker NO_RETURN;
-static void start_pthread_worker(void* exec_) NO_RETURN; /* 前向声明匹配 */
+static void start_pthread_worker(void* exec_) NO_RETURN; 
 static bool load_executable(const char* file_name, void (**eip)(void), void** esp);
 
 /* ------------------ 文件描述符管理辅助函数 ------------------ */
@@ -196,21 +196,6 @@ tid_t process_execute(const char* file_name) {
     return new_tid;
   } 
   
-  // 加载失败，清理资源
-  // 注意：meta 内存会在子进程退出时或者在此处由父进程清理，
-  // 但根据引用计数逻辑，如果 start_process_worker 失败，它会处理自己的引用。
-  // 此处我们需要根据协议判断谁负责释放。
-  // 通常如果 is_loaded 为 false，子线程已经退出。
-  // 按照 process_wait 的逻辑，我们应该在这里处理释放吗？
-  // 如果子线程加载失败，它会调用 thread_exit，进而 sema_up(&finish)。
-  // 但是在这里我们仅仅 sema_down(&load)。
-  // 简单的做法：如果加载失败，返回 -1。
-  // 子线程在加载失败时会释放它的资源吗？
-  // 让我们看 start_process_worker：失败时 sema_up(&finish), thread_exit。
-  // 这样父进程 process_wait 才能回收它。
-  // 但这里我们不调用 process_wait，直接返回 -1。
-  // 所以我们需要在这里清理掉 meta，因为我们没有把它加入 child_thread 列表。
-  
   free(meta);
   return -1;
 }
@@ -276,14 +261,12 @@ static void start_process_worker(void* aux_data) {
   // 错误处理路径
   if (!load_ok) {
     if (pcb_alloc_ok) {
-        // 若 PCB 已分配，需清理内部资源
-        // 注意：load_executable 失败可能已经打开了 executable，需检查
         if (curr->pcb->executable) file_close(curr->pcb->executable);
         free(curr->pcb->child_thread);
         free(curr->pcb->fd_blocks);
         
         struct process* ptr = curr->pcb;
-        curr->pcb = NULL; // 防止 use-after-free
+        curr->pcb = NULL; 
         free(ptr);
     }
     
@@ -494,6 +477,8 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
   off_t offset;
   bool is_success = false;
   int i;
+  /* 修复: 在函数开头定义 stack_addresses，避免跳转跳过变量声明 */
+  char** stack_addresses = NULL;
 
   // 1. 命令行参数解析准备
   char* cmd_buf = malloc(strlen(file_name) + 1);
@@ -520,6 +505,14 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
       return false;
   }
   
+  /* 修复: 在 arg_vector 分配后立即分配 stack_addresses，确保 goto cleanup 时安全 */
+  stack_addresses = malloc((arg_max + 1) * sizeof(char*));
+  if (!stack_addresses) {
+      free(cmd_buf);
+      free(arg_vector);
+      return false;
+  }
+
   arg_vector[arg_max] = NULL;
   int arg_idx = 0;
 
@@ -621,8 +614,7 @@ bool load_executable(const char* file_name, void (**eip)(void), void** esp) {
   /* ------------------ 参数压栈逻辑 ------------------ */
   
   // 1. 压入所有参数字符串
-  char* stack_addresses[arg_max];
-  
+  // 修复：使用动态分配的 stack_addresses 替代 VLA
   for (int j = arg_max - 1; j >= 0; j--) {
     size_t len = strlen(arg_vector[j]) + 1;
     *esp -= len;
@@ -668,6 +660,8 @@ cleanup:
     if (arg_vector[j]) free(arg_vector[j]);
   }
   free(arg_vector);
+  /* 修复：释放 stack_addresses */
+  free(stack_addresses);
 
   // 同步状态到共享元数据
   curr->shared->is_loaded = is_success;
@@ -760,7 +754,10 @@ static bool map_user_page(void* uaddr, void* kaddr, bool rw) {
 // Project 2 预留接口
 bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; }
 tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSED) { return -1; }
-static void start_pthread_worker(void* exec_ UNUSED) {}
+/* 修复：添加 thread_exit() 满足 noreturn 属性 */
+static void start_pthread_worker(void* exec_ UNUSED) {
+    thread_exit();
+}
 tid_t pthread_join(tid_t tid UNUSED) { return -1; }
 void pthread_exit(void) {}
 void pthread_exit_main(void) {}
