@@ -24,6 +24,18 @@ typedef int tid_t;
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
 
+/* Scheduler policies. 
+   新增：定义调度策略枚举，供 init.c 和 thread.c 使用 */
+enum sched_policy {
+  SCHED_FIFO,
+  SCHED_PRIO,
+  SCHED_FAIR,
+  SCHED_MLFQS
+};
+
+/* 新增：定义默认调度策略 */
+#define SCHED_DEFAULT SCHED_FIFO
+
 /* 前向声明 struct dir，避免循环引用 */
 struct dir;
 
@@ -92,6 +104,9 @@ struct thread {
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+
+/* 新增：声明当前激活的调度策略变量 */
+extern enum sched_policy active_sched_policy;
 
 void thread_init(void);
 void thread_start(void);
