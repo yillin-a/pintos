@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h> /* 修复：uint32_t 需要此头文件 */
 
 void syscall_init(void);
 
