@@ -145,9 +145,10 @@ start:
 #       write-protect bits in page tables (!).
 #    EM (Emulation): forces floating-point instructions to trap.
 #       We don't (yet) support floating point.
+# MODIFIED CODE: Removed from orl line " | CR0_EM"
 
 	movl %cr0, %eax
-	orl $CR0_PE | CR0_PG | CR0_WP | CR0_EM, %eax
+	orl $CR0_PE | CR0_PG | CR0_WP, %eax
 	movl %eax, %cr0
 
 # We're now in protected mode in a 16-bit segment.  The CPU still has

@@ -81,6 +81,20 @@ typedef int tid_t;
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
+   
+/* meta_info 结构体作为线程与其父线程之间的共享数据结构，存储在 thread 结构体中 */
+typedef struct meta_info {
+  tid_t tid;                // 用于标识正在处理的子进程的线程ID
+  struct lock tlock;        // 用于实现原子操作的锁
+  struct semaphore finish;  // 用于同步退出函数的信号量
+  struct list_elem elem;    // 用于将结构体作为 Pintos 列表的一部分
+  char* file_copy;          // 在传递给 start_process 函数时用于存储命令行参数的副本
+  int share_count;          // 正在引用共享数据的活动进程的数量
+  struct semaphore load;    // 用于在进程间同步加载的信号量
+  int exit_code;            // 在子进程退出后存储其退出码
+  bool is_loaded;           // 表示加载是否已经完成的布尔值
+} thread_metainfo;
+
 struct thread {
   /* Owned by thread.c. */
   tid_t tid;                 /* Thread identifier. */
@@ -89,29 +103,21 @@ struct thread {
   uint8_t* stack;            /* Saved stack pointer. */
   int priority;              /* Priority. */
   struct list_elem allelem;  /* List element for all threads list. */
+  thread_metainfo* shared;        /* Shared meta_info list with parents. */
 
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
 
-//#ifdef USERPROG
+#ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */
-//#endif
+#endif
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
-
-  int64_t ticks_blocked;
-  int base_priority;                  /* Base priority. */
-  struct list locks;                  /* Locks that the thread is holding. */
-  struct lock *lock_waiting;          /* The lock that the thread is waiting for. */
-  int ticks;                          /* The number of ticks that the thread has been running. */
-
-
-  int nice;                           // 线程的nice值，影响调度行为
-  fixed_point_t recent_cpu;                // 最近CPU使用时间   
-/*由thread.c和synch.c共享*/
 };
+
+typedef struct list thread_metainfo_list;
 
 /* Types of scheduler that the user can request the kernel
  * use to schedule threads at runtime. */
@@ -129,11 +135,9 @@ enum sched_policy {
  * Is equal to SCHED_FIFO by default. */
 extern enum sched_policy active_sched_policy;
 
-// True if the kernel should use the MLFQS scheduler
-extern bool thread_mlfqs;
-
 void thread_init(void);
 void thread_start(void);
+
 void thread_tick(void);
 void thread_print_stats(void);
 
@@ -162,19 +166,4 @@ void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
 
-bool thread_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-void blocked_thread_check(struct thread *t, void *aux UNUSED);
-bool thread_cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-void thread_donate_priority (struct thread *t);
-void thread_hold_the_lock(struct lock *lock);
-void mlfqs_update_load_avg_and_recent_cpu();
-void thread_remove_lock(struct lock *lock);
-void thread_update_priority(struct thread *t);
-bool lock_cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-void mlfqs_inc_recent_cpu();
-void mlfqs_update_priority(struct thread *t);
-void thread_fair_update_ticks(void);
-
-
 #endif /* threads/thread.h */
-

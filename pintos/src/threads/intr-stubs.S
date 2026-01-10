@@ -22,6 +22,10 @@ intr_entry:
 	pushl %es
 	pushl %fs
 	pushl %gs
+   # Make space to save the FPU
+	subl $108, %esp
+	# Saving the FPU
+	fsave (%esp)
 	pushal
 
 	/* Set up kernel environment. */
@@ -51,6 +55,10 @@ intr_entry:
 intr_exit:
 	/* Restore caller's registers. */
 	popal
+   # Restoring the FPU
+	frstor (%esp)
+	# Remove space from the stack: 108
+	addl $108, %esp
 	popl %gs
 	popl %fs
 	popl %es
