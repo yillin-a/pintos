@@ -6,130 +6,124 @@
 
 struct tokens;
 
-static void *expand_string_array(char ***array_ptr, size_t *current_size, void *new_element)
+static void *vector_push(char ***pointer, size_t *size, void *elem)
 {
-  *array_ptr = (char **)realloc(*array_ptr, sizeof(char *) * (*current_size + 1));
-  (*array_ptr)[*current_size] = new_element;
-  *current_size += 1;
-  return new_element;
+  *pointer = (char **)realloc(*pointer, sizeof(char *) * (*size + 1));
+  (*pointer)[*size] = elem;
+  *size += 1;
+  return elem;
 }
 
-static void *duplicate_word(char *src, size_t length)
+static void *copy_word(char *source, size_t n)
 {
-  src[length] = '\0';
-  char *duplicated = (char *)malloc(length + 1);
-  strncpy(duplicated, src, length + 1);
-  return duplicated;
+  source[n] = '\0';
+  char *word = (char *)malloc(n + 1);
+  strncpy(word, source, n + 1);
+  return word;
 }
 
 struct tokens *tokenize(const char *line)
 {
-  // 输入字符串为空则直接返回NULL
-  if (line == NULL) return NULL;
-
-  // 定义静态字符数组存储当前解析的词
-  static char word_buffer[4096];
-  size_t current_length = 0, max_length = 4096; // current_length记录当前词长度，max_length是缓冲区最大长度
-
-  // 为解析后的tokens分配内存
-  struct tokens *result_tokens = (struct tokens *)malloc(sizeof(struct tokens));
-  if (result_tokens == NULL) {
-    perror("Memory allocation failed");
+  if (line == NULL)
+  {
     return NULL;
   }
 
-  // 初始化tokens结构体
-  result_tokens->tokens_length = 0;
-  result_tokens->tokens = NULL;
-  result_tokens->buffers_length = 0;
-  result_tokens->buffers = NULL;
+  static char token[4096];
+  size_t n = 0, n_max = 4096;
+  struct tokens *tokens;
+  size_t line_length = strlen(line);
 
-  // 定义解析状态常量
-  const int STATE_REGULAR = 0, STATE_SINGLE_QUOTE = 1, STATE_DOUBLE_QUOTE = 2;
-  int current_state = STATE_REGULAR; // 初始状态为常规状态
+  tokens = (struct tokens *)malloc(sizeof(struct tokens));
+  tokens->tokens_length = 0;
+  tokens->tokens = NULL;
+  tokens->buffers_length = 0;
+  tokens->buffers = NULL;
 
-  // 获取输入字符串长度
-  size_t input_length = strlen(line);
+  const int MODE_NORMAL = 0, MODE_SQUOTE = 1, MODE_DQUOTE = 2;
+  int mode = MODE_NORMAL;
 
-  // 遍历输入字符串的每个字符
-  for (unsigned int idx = 0; idx < input_length; idx++) {
-    char current_char = line[idx];
-
-    if (current_state == STATE_REGULAR) {
-      // 遇到单引号，切换到单引号状态
-      if (current_char == '\'') {
-        current_state = STATE_SINGLE_QUOTE;
+  for (unsigned int i = 0; i < line_length; i++)
+  {
+    char c = line[i];
+    if (mode == MODE_NORMAL)
+    {
+      if (c == '\'')
+      {
+        mode = MODE_SQUOTE;
       }
-      // 遇到双引号，切换到双引号状态
-      else if (current_char == '"') {
-        current_state = STATE_DOUBLE_QUOTE;
+      else if (c == '"')
+      {
+        mode = MODE_DQUOTE;
       }
-      // 处理转义符
-      else if (current_char == '\\') {
-        if (idx + 1 < input_length) {
-          word_buffer[current_length++] = line[++idx]; // 跳过转义符，保存下一个字符
+      else if (c == '\\')
+      {
+        if (i + 1 < line_length)
+        {
+          token[n++] = line[++i];
         }
       }
-      // 遇到空白字符，表示词结束
-      else if (isspace(current_char)) {
-        if (current_length > 0) {
-          void *completed_word = duplicate_word(word_buffer, current_length); // 复制当前词
-          expand_string_array(&result_tokens->tokens, &result_tokens->tokens_length, completed_word); // 添加词到tokens数组
-          current_length = 0; // 重置当前词长度
+      else if (isspace(c))
+      {
+        if (n > 0)
+        {
+          void *word = copy_word(token, n);
+          vector_push(&tokens->tokens, &tokens->tokens_length, word);
+          n = 0;
         }
       }
-      // 普通字符，添加到当前词
-      else {
-        word_buffer[current_length++] = current_char;
+      else
+      {
+        token[n++] = c;
       }
     }
-    else if (current_state == STATE_SINGLE_QUOTE) {
-      // 遇到单引号，退出单引号状态
-      if (current_char == '\'') {
-        current_state = STATE_REGULAR;
+    else if (mode == MODE_SQUOTE)
+    {
+      if (c == '\'')
+      {
+        mode = MODE_NORMAL;
       }
-      // 处理转义符
-      else if (current_char == '\\') {
-        if (idx + 1 < input_length) {
-          word_buffer[current_length++] = line[++idx]; // 跳过转义符，保存下一个字符
+      else if (c == '\\')
+      {
+        if (i + 1 < line_length)
+        {
+          token[n++] = line[++i];
         }
       }
-      // 普通字符，添加到当前词
-      else {
-        word_buffer[current_length++] = current_char;
+      else
+      {
+        token[n++] = c;
       }
     }
-    else if (current_state == STATE_DOUBLE_QUOTE) {
-      // 遇到双引号，退出双引号状态
-      if (current_char == '"') {
-        current_state = STATE_REGULAR;
+    else if (mode == MODE_DQUOTE)
+    {
+      if (c == '"')
+      {
+        mode = MODE_NORMAL;
       }
-      // 处理转义符
-      else if (current_char == '\\') {
-        if (idx + 1 < input_length) {
-          word_buffer[current_length++] = line[++idx]; // 跳过转义符，保存下一个字符
+      else if (c == '\\')
+      {
+        if (i + 1 < line_length)
+        {
+          token[n++] = line[++i];
         }
       }
-      // 普通字符，添加到当前词
-      else {
-        word_buffer[current_length++] = current_char;
+      else
+      {
+        token[n++] = c;
       }
     }
-
-    // 检查缓冲区是否已满，如果满则终止程序
-    if (current_length + 1 >= max_length) {
+    if (n + 1 >= n_max)
       abort();
-    }
   }
 
-  // 处理最后一个词
-  if (current_length > 0) {
-    void *final_word = duplicate_word(word_buffer, current_length); // 复制当前词
-    expand_string_array(&result_tokens->tokens, &result_tokens->tokens_length, final_word); // 添加词到tokens数组
-    current_length = 0; // 重置当前词长度
+  if (n > 0)
+  {
+    void *word = copy_word(token, n);
+    vector_push(&tokens->tokens, &tokens->tokens_length, word);
+    n = 0;
   }
-
-  return result_tokens; // 返回解析后的tokens结构体
+  return tokens;
 }
 
 size_t tokens_get_length(struct tokens *tokens)
@@ -165,21 +159,20 @@ void tokens_destroy(struct tokens *tokens)
   }
   // printf("Tokens is not NULL.\n");
   // printf("Tokens_length:%ld\n", tokens->tokens_length);
-  int idx;
-  for (idx = 0; idx < tokens->tokens_length; idx++)
+  for (int i = 0; i < tokens->tokens_length; i++)
   {
-    // printf("Freeing tokens->tokens[%d]:%s\n", idx, tokens->tokens[idx]);
-    if (tokens->tokens[idx])
-      free(tokens->tokens[idx]);
-    // printf("Freed tokens->tokens[%d]\n", idx);
+    // printf("Freeing tokens->tokens[%d]:%s\n", i, tokens->tokens[i]);
+    if (tokens->tokens[i])
+      free(tokens->tokens[i]);
+    // printf("Freed tokens->tokens[%d]\n", i);
   }
   // printf("Freed all the tokens->tokens");
   // printf("Buffers_length:%ld\n", tokens->buffers_length);
-  for (idx = 0; idx < tokens->buffers_length; idx++)
+  for (int i = 0; i < tokens->buffers_length; i++)
   {
-    // printf("Freeing tokens->buffers[%d]\n", idx);
-    if (tokens->buffers[idx])
-      free(tokens->buffers[idx]);
+    // printf("Freeing tokens->buffers[%d]\n", i);
+    if (tokens->buffers[i])
+      free(tokens->buffers[i]);
   }
   // printf("Freed all the tokens->buffers\n");
   if (tokens->tokens)
