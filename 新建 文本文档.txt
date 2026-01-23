@@ -1,0 +1,39 @@
+加载个人及系统配置文件用了 565 毫秒。
+PS D:\OS_homework\iaf> git remote add origin https://github.com/yillin-a/pintos.git
+error: remote origin already exists.
+PS D:\OS_homework\iaf> git remote -v
+origin  http://gitlab.etao.net/osd25f/iaf.git (fetch)
+origin  http://gitlab.etao.net/osd25f/iaf.git (push)
+PS D:\OS_homework\iaf> git remote rename origin gitlab
+Renaming remote references: 100% (4/4), done.
+PS D:\OS_homework\iaf> git remote add origin https://github.com/yillin-a/pintos.git
+PS D:\OS_homework\iaf> git remote -v
+gitlab  http://gitlab.etao.net/osd25f/iaf.git (fetch)
+gitlab  http://gitlab.etao.net/osd25f/iaf.git (push)
+origin  https://github.com/yillin-a/pintos.git (fetch)
+origin  https://github.com/yillin-a/pintos.git (push)
+PS D:\OS_homework\iaf> git push origin main
+error: src refspec main does not match any
+error: failed to push some refs to 'https://github.com/yillin-a/pintos.git'
+PS D:\OS_homework\iaf> git branch
+* iaf_tmp
+  master
+PS D:\OS_homework\iaf> git branch
+* iaf_tmp
+  master
+PS D:\OS_homework\iaf> git branch -M main
+PS D:\OS_homework\iaf> git branch
+* main
+  master
+PS D:\OS_homework\iaf> git push -u origin main
+Enumerating objects: 1016, done.
+Counting objects: 100% (1016/1016), done.
+Delta compression using up to 16 threads
+Compressing objects: 100% (988/988), done.
+Writing objects: 100% (1016/1016), 2.78 MiB | 802.00 KiB/s, done.
+Total 1016 (delta 224), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (224/224), done.
+To https://github.com/yillin-a/pintos.git
+ * [new branch]      main -> main
+branch 'main' set up to track 'origin/main'.
+PS D:\OS_homework\iaf>

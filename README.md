@@ -1,21 +1,21 @@
 
 # **`ZJUT`操作系统课程设计** #
 
-**班级：计算机科学与技术2202**
+**班级：计算机科学与技术2301**
 
 **姓名：胡益临**
 
 **学号：302023315402**
 
 
-
+***
 ## **HW0:项目介绍**
 
 <!-- # 实验概述 -->
 
-本次操作系统课程设计的核心任务是基于 Stanford CS140 课程开发的 **Pintos** 教学操作系统框架进行内核功能的扩展与完善。实验旨在通过“代码阅读—架构设计—功能实现—调试验证”的完整工程链路，将操作系统理论课中的抽象概念（如并发、调度、虚拟内存、系统调用等）转化为具体的内核 C 语言实现，从而深入剖析现代操作系统底层的运行机制与设计权衡。
+&emsp;&emsp;本次操作系统课程设计的核心任务是基于 Stanford CS140 课程开发的 **Pintos** 教学操作系统框架进行内核功能的扩展与完善。实验旨在通过“代码阅读—架构设计—功能实现—调试验证”的完整工程链路，将操作系统理论课中的抽象概念（如并发、调度、虚拟内存、系统调用等）转化为具体的内核 C 语言实现，从而深入剖析现代操作系统底层的运行机制与设计权衡。
 
-经过系统的开发与严格的测试，本次实验成功完成了以下三个核心模块的构建与优化：
+&emsp;&emsp;经过系统的开发与严格的测试，本次实验成功完成了以下四个核心模块的构建与优化：
 
 1.  **命令行交互 (Shell)**：
     构建了基础的用户交互接口，熟悉了 Pintos 的启动流程、内核链表（`struct list`）的操作以及基础的输入输出处理，为后续内核调试奠定了基础。
@@ -26,7 +26,11 @@
 3.  **用户程序 (User Programs)**：
     打通了用户态（User Land）与内核态（Kernel Land）的边界。实现了**参数传递 (Argument Passing)** 机制，使得内核能够正确解析并设置用户栈。构建了完整的文件系统调用接口（包括 `read`, `write`, `open`, `exec`, `wait` 等），并利用同步原语解决了父子进程间的同步与资源回收问题，使 Pintos 具备了加载并运行 ELF 格式可执行文件的能力。
 
-# **HW1：环境配置**
+4.  **文件系统 (File Systems)**：
+    彻底重构了原有的基础文件系统，极大地增强了其性能与功能。引入了**缓冲区缓存 (Buffer Cache)** 机制，利用 LRU/Clock 置换算法及写回（Write-behind）策略显著降低了磁盘 I/O 开销。放弃了连续分配方式，采用**多级索引 (Indexed Inode)** 结构（包含直接、间接及双重间接指针）实现了**文件自动扩展 (Extensible Files)**。此外，实现了**分层目录 (Subdirectories)** 支持，能够解析任意深度的绝对与相对路径，并确保了文件系统操作的并发一致性。
+
+***
+## **HW1：环境配置**
 **实验环境**
 ```
 在Windows系统上通过WSL 2（Windows Subsystem for Linux）运行Ubuntu系统（类虚拟机环境），系统版本信息为：
@@ -54,22 +58,119 @@ sudo apt install clang
 git clone https://gitlab.etao.net/zjutosd/group0
 ```
 
+***
 ## **HW2:`shell`**
 
+&emsp;&emsp;`shell` 部分主要涉及五个核心任务（Mission）的开发与集成：
+
+1. **Support for cd and pwd**（支持路径切换与当前路径显示）
+
+2. **Program execution**（外部程序的加载与执行）
+
+3. **Path resolution**（文件路径解析）
+
+4. **Input/Output Redirection**（标准输入/输出重定向）
+
+5. **Signal Handling and Terminal Control**（信号处理与终端控制）
 
 
-`shell` 部分主要涉及五个核心任务（Mission）的开发与集成：
+<p align="center">
+  <img src="osppt_04.png" width="50%">
+</p>
 
-1.  **Support for cd and pwd**（支持路径切换与当前路径显示）
-2.  **Program execution**（外部程序的加载与执行）
-3.  **Path resolution**（文件路径解析）
-4.  **Input/Output Redirection**（标准输入/输出重定向）
-5.  **Signal Handling and Terminal Control**（信号处理与终端控制）
+### **功能模块详细设计与实现**
 
+&emsp;&emsp;基于上述架构图，本 Shell 的开发将分为五个阶段逐步推进。每个阶段针对特定的系统机制进行实现，具体技术细节如下：
+
+#### Mission 1: 内置命令支持 (Support for cd and pwd)
+
+&emsp;&emsp;内置命令是指必须由 Shell 进程自身执行，而不能通过创建子进程来执行的指令。最典型的例子是 `cd`，因为它需要修改当前 Shell 进程的运行环境（工作目录）。
+
+*   **技术原理**：
+    *   Shell 主循环在解析用户输入后，首先检查命令名称。
+    *   如果是内置命令，直接调用相应的 C 库函数，跳过 `fork-exec` 流程。
+*   **关键系统调用**：
+    *   `chdir(const char *path)`: 用于实现 `cd` 命令，更改当前工作目录。
+    *   `getcwd(char *buf, size_t size)`: 用于实现 `pwd` 命令，获取当前绝对路径。
+*   **实现逻辑**：
+    1.  解析 Token 0（命令名）。
+    2.  若为 `exit`，直接调用 `exit(0)` 终止 Shell。
+    3.  若为 `cd`，检查是否有参数。若有，调用 `chdir(path)`；若调用失败（返回 -1），输出错误信息（如目录不存在）。
+    4.  若为 `pwd`，调用 `getcwd()` 并打印结果。
+
+#### Mission 2: 外部程序执行 (Program Execution)
+
+&emsp;&emsp;对于非内置命令（如 `ls`, `mkdir`, `gcc` 等），Shell 需要遵循标准的 Unix 进程创建模型来执行。
+
+*   **技术原理**：**Fork-Exec-Wait 模型**。
+*   **关键系统调用**：
+    *   `fork()`: 复制当前进程。返回值 `0` 表示子进程，`>0` 表示父进程（返回的是子进程 PID）。
+    *   `execv(const char *path, char *const argv[])`: 在子进程中加载并运行新的可执行文件。注意：一旦调用成功，子进程的代码段、数据段将被新程序替换，不会返回。
+    *   `waitpid(pid_t pid, int *status, int options)`: 父进程调用此函数挂起，直到指定的子进程状态改变（结束）。
+*   **实现逻辑**：
+    1.  父进程调用 `fork()`。
+    2.  **子进程中**：调用 `execv()` 加载目标程序。如果 `execv` 返回，说明执行失败（如文件未找到），需打印错误并 `exit()`。
+    3.  **父进程中**：调用 `waitpid()` 阻塞等待子进程结束，然后恢复交互循环。
+
+#### Mission 3: 路径解析 (Path Resolution)
+
+&emsp;&emsp;用户通常只输入命令名（如 `ls`），而不是完整路径（如 `/bin/ls`）。Shell 需要利用环境变量 `PATH` 来定位可执行文件。
+
+*   **技术原理**：
+    *   `PATH` 环境变量包含一组以冒号 `:` 分隔的目录。Shell 需遍历这些目录，查找是否存在目标文件。
+*   **关键函数**：
+    *   `getenv("PATH")`: 获取环境变量字符串。
+    *   `strtok()`: 用于按 `:` 分割路径字符串。
+    *   `access(const char *pathname, int mode)`: 使用 `X_OK` 模式检查文件是否存在且具有执行权限。
+*   **实现逻辑**：
+    1.  检查命令是否包含 `/`。若包含（如 `./main`），视为绝对/相对路径，直接执行。
+    2.  若不包含，获取 `PATH` 变量。
+    3.  循环遍历 `PATH` 中的每个目录，将 `目录` + `/` + `命令名` 拼接成完整路径。
+    4.  对拼接后的路径调用 `access()`。
+    5.  一旦找到第一个可执行路径，停止搜索并将其传递给 `execv`。
+
+#### Mission 4: I/O 重定向 (Input/Output Redirection)
+
+&emsp;&emsp;支持使用 `<` 和 `>` 符号改变命令的标准输入和输出流向。
+
+*   **技术原理**：
+    *   Linux 中的文件描述符 (File Descriptor, FD) 机制。
+    *   标准输入为 FD 0，标准输出为 FD 1。重定向的本质是将这些 FD 指向新的文件。
+*   **关键系统调用**：
+    *   `open()`: 打开目标文件，获取新的 FD。
+    *   `dup2(int oldfd, int newfd)`: 复制文件描述符。例如 `dup2(fd, 1)` 会将标准输出指向 `fd` 对应的文件。
+    *   `close()`: 关闭不再需要的 FD。
+*   **实现逻辑 (在 fork 之后的子进程中执行)**：
+    1.  在执行 `execv` 之前，扫描参数列表。
+    2.  若发现 `>`，打开后文件名（`O_WRONLY | O_CREAT | O_TRUNC`），使用 `dup2` 替换 `STDOUT_FILENO`。
+    3.  若发现 `<`，打开后文件名（`O_RDONLY`），使用 `dup2` 替换 `STDIN_FILENO`。
+    4.  将重定向符号及其文件名从参数列表中移除，再调用 `execv`。
+
+#### Mission 5: 信号处理 (Signal Handling)
+
+&emsp;&emsp;确保 Shell 的健壮性，即用户在 Shell 中按下 `Ctrl+C` 时，应该终止当前正在运行的子程序，而不是 Shell 本身。
+
+*   **技术原理**：
+    *   `SIGINT`: 中断信号（Ctrl+C 发出）。
+*   **关键函数**：
+    *   `signal(int signum, sighandler_t handler)` 或 `sigaction()`。
+*   **实现逻辑**：
+    1.  **Shell 初始化时**：设置 `SIGINT` 的处理方式为忽略 (`SIG_IGN`) 或注册一个仅打印换行符的空处理函数。这保证 Shell 主进程不会被杀掉。
+    2.  **子进程 Fork 后，Exec 前**：显式将 `SIGINT` 的处理方式恢复为默认 (`SIG_DFL`)。这样，用户运行的 `ping` 或 `top` 等程序可以正常响应 Ctrl+C 并退出。
+    3.  **父进程**：在 `waitpid` 期间保持忽略信号，待子进程退出后继续下一轮循环。
+
+程序总体流程图如下：
+<!-- ![总体图](osppt_01.png) -->
+
+<p align="center">
+  <img src="osppt_01.png" width="70%">
+</p>
+
+***
 ### **任务一：Add support for cd and pwd —— 支持 cd 和 pwd 命令**
 
 **任务背景说明：**
-Shell 的核心架构中包含了一套针对“内建指令（Built-in Commands）”的调度分发机制。一个功能完备的 Shell 必须兼容各类内建指令，这些指令直接在 Shell 进程内部执行，而非通过 `fork/exec` 启动独立的外部应用。
+&emsp;&emsp;Shell 的核心架构中包含了一套针对“内建指令（Built-in Commands）”的调度分发机制。一个功能完备的 Shell 必须兼容各类内建指令，这些指令直接在 Shell 进程内部执行，而非通过 `fork/exec` 启动独立的外部应用。
 *   **必要性分析**：以 `exit` 和 `cd` 为例，它们必须实现为内建指令。因为 `exit` 旨在终止 Shell 自身进程，而 `cd` 旨在修改 Shell 进程的“当前工作目录（Current Working Directory）”上下文。若作为外部子进程运行，子进程的目录变更无法反向影响父进程（Shell），导致命令失效。
 *   **现状**：基础代码仅支持 `?`（帮助）和 `exit`（退出）两个指令。
 
@@ -83,15 +184,24 @@ Description：
 
 &emsp;&emsp;指令处理的生命周期始于**输入解析阶段**。当 Shell 捕获到用户在终端输入的原始命令行字符串后，系统首先调用 `tokenizer.c` 模块中的核心函数 `tokenize`。该函数执行**词法分析（Lexical Analysis）**，利用有限状态机（FSM）模型处理空格、转义字符及引号，将非结构化的字符串切割成一系列结构化的 token（词法单元），并按序存储至参数数组中。
 
+&emsp;&emsp;状态机转换图如下:
+
+<p align="center">
+  <img src="osppt_03.png" width="70%">
+</p>
+
+
 &emsp;&emsp;完成解析后，系统提取数组中的首个 token（即 `argv[0]`）作为命令标识符，并将其传入 `search_command()` 函数进行**指令分发（Command Dispatching）**。该函数遍历全局维护的 `cmd_table`（命令映射表），查询是否存在对应的注册信息：
 *   **内建命令命中**：若在表中找到匹配项，函数返回该命令在表中的索引值（Index），Shell 随即通过函数指针直接调用对应的内核处理函数。
 *   **非内建命令（Fall-through）**：若匹配失败（返回 -1），系统将该 token 判定为外部可执行程序，并转交由进程加载器（Program Loader）尝试在文件系统中查找并运行该程序。
+
+
 
 #### **主要函数实现**
 
 **`cmd_table` 的结构设计与实现:**
 
-为了实现命令名称到处理函数的映射，定义了 `func_desc` 结构体，构建了一个可扩展的命令注册表：
+&emsp;&emsp;为了实现命令名称到处理函数的映射，定义了 `func_desc` 结构体，构建了一个可扩展的命令注册表：
 
 ```C
 /* 命令描述符结构体 */
@@ -113,7 +223,7 @@ func_desc_t command_table[] = {
 
 **`search_command` 的查找逻辑:**
 
-采用线性扫描的方式遍历注册表，通过字符串比较确定命令类型。由于内建命令数量较少，线性查找的效率 $O(N)$ 是完全可接受的。
+&emsp;&emsp;采用线性扫描的方式遍历注册表，通过字符串比较确定命令类型。由于内建命令数量较少，线性查找的效率 $O(N)$ 是完全可接受的。
 
 ```C
 int search_command(char cmd[]) {
@@ -132,7 +242,7 @@ int search_command(char cmd[]) {
 
 ##### **内置命令 `pwd` 的实现:**
 
-该函数是对系统调用 `getcwd` 的封装。它申请一个缓冲区来存储路径，并在获取失败时提供错误反馈。
+&emsp;&emsp;该函数是对系统调用 `getcwd` 的封装。它申请一个缓冲区来存储路径，并在获取失败时提供错误反馈。
 
 ```C
 /* 输出当前工作目录 */
@@ -153,7 +263,7 @@ int cmd_pwd(unused struct tokens *tokens) {
 
 ##### **内置命令 `cd` 的实现：**
 
-`cd` 命令不仅要调用 `chdir`，更关键的是要进行严谨的参数校验（Argument Validation），防止因空参数或无效路径导致程序异常。
+&emsp;&emsp;`cd` 命令不仅要调用 `chdir`，更关键的是要进行严谨的参数校验（Argument Validation），防止因空参数或无效路径导致程序异常。
 
 ```C
 /* 切换当前工作目录到指定目录 */
@@ -180,7 +290,7 @@ int cmd_cd(struct tokens *tokens) {
 
 **`tokenize` 函数的核心实现（词法分析器）：**
 
-`tokenize` (在代码中为 `parse_line`) 实现了一个典型的**有限状态机 (Finite State Machine, FSM)**。它逐字符扫描输入流，根据当前字符类型在不同状态间流转，从而正确处理复杂的引号嵌套和转义序列。
+&emsp;&emsp;`tokenize` (在代码中为 `parse_line`) 实现了一个典型的**有限状态机 (Finite State Machine, FSM)**。它逐字符扫描输入流，根据当前字符类型在不同状态间流转，从而正确处理复杂的引号嵌套和转义序列。
 
 ```C
 struct tokens *parse_line(const char *input) {
@@ -261,31 +371,30 @@ struct tokens *parse_line(const char *input) {
 }
 ```
 
-该词法分析器的核心逻辑通过 `current_state` 变量维护上下文：
+&emsp;&emsp;该词法分析器的核心逻辑通过 `current_state` 变量维护上下文：
 1.  **普通状态 (STATE_NORMAL)**：这是默认状态。FSM 寻找空格作为分隔符来切分 Token。一旦遇到引号，立即跳转至对应状态。
 2.  **单引号状态 (STATE_SINGLE_QUOTE)**：进入“强引用”模式。此模式下空格不再被视为分隔符，从而允许参数中包含空格（例如 `cd 'my folder'`）。只有遇到闭合的单引号才会回归普通状态。
 3.  **双引号状态 (STATE_DOUBLE_QUOTE)**：与单引号类似，用于处理包含空格的参数，但通常在语义上允许变量扩展（虽然本基础 Shell 暂未实现变量扩展，但保留了转义字符的处理逻辑）。
 
-整个过程将输入流从“字符流”转化为“参数列表”，若缓冲区溢出则触发 `abort` 保护，最终返回封装好的 `struct tokens` 指针供执行阶段使用。
+&emsp;&emsp;整个过程将输入流从“字符流”转化为“参数列表”，若缓冲区溢出则触发 `abort` 保护，最终返回封装好的 `struct tokens` 指针供执行阶段使用。
 
 #### **实验结果**
 
-通过编译并在模拟环境中运行 Shell，进行了如下测试以验证内建命令的正确性：
+&emsp;&emsp;通过编译并在模拟环境中运行 Shell，进行了如下测试以验证内建命令的正确性：
 1.  启动 Shell 后，执行 `pwd`，正确显示了初始工作目录。
 2.  执行 `cd ..` 切换至上级目录，再次执行 `pwd`，路径发生变更，证明目录上下文修改成功且具有持久性。
 
 ```bash
-yillin@yillin:~/work2/hkw/hw-shell$ make
-yillin@yillin:~/work2/hkw/hw-shell$ ./shell
+yillin@yillin:/mnt/d/OS_homework/iaf/hw-shell$  gcc shell.c tokenizer.c -o myshell
+yillin@yillin:/mnt/d/OS_homework/iaf/hw-shell$ ./myshell
 ```
+![1.png](1.png)
 
-
-
-
+***
 ### **任务二：Program execution —— 外部程序的加载与执行**
 
 **任务背景说明：**
-Shell 的核心能力之一是充当“程序启动器（Launcher）”。当用户输入的指令无法匹配任何内建命令（如 `cd`, `exit`）时，Shell 将默认该指令为外部可执行程序的路径。
+&emsp;&emsp;Shell 的核心能力之一是充当“程序启动器（Launcher）”。当用户输入的指令无法匹配任何内建命令（如 `cd`, `exit`）时，Shell 将默认该指令为外部可执行程序的路径。
 *   **当前问题**：基础 Shell 遇到非内建指令时，会报错无法识别。
 *   **目标**：实现通用的程序加载机制。将命令行中的首个 token 识别为程序名（Executable Name），后续 token 识别为参数列表（Argument List），并通过操作系统提供的进程创建接口启动该程序。
 
@@ -304,6 +413,11 @@ Description:
     *   **父进程**：负责作业控制。
 3.  **程序加载（Image Loading）**：子进程调用 `execv`，用目标程序的代码段和数据段覆盖当前进程空间，并重新初始化堆栈，从而变身为新的程序实体。
 4.  **同步等待（Synchronization）**：父进程调用 `waitpid` 进入阻塞状态，直到捕获到子进程的退出状态码（Exit Status），随后回收僵尸进程（Zombie Process）资源并恢复交互。
+
+
+<p align="center">
+  <img src="osppt_02.png" width="90%">
+</p>
 
 #### **主要函数实现**
 
@@ -441,10 +555,12 @@ int run_external_prog(struct tokens *tokens) {
 3.  **重定向测试**：配合重定向符号（见后续任务），验证了输入输出流已被正确接管。
 
 ```bash
-yillin@yillin:~/work2/hkw/hw-shell$ ./shell
+yillin@yillin:/mnt/d/OS_homework/iaf/hw-shell$ ./myshell
 ```
 
-自定义 Shell 已成功具备加载并运行系统外部命令的能力，表现与标准 Bash 一致。
+![2.png](2.png)
+
+&emsp;&emsp;自定义 Shell 已成功具备加载并运行系统外部命令的能力，表现与标准 Bash 一致。
 
 ***
 
@@ -462,16 +578,16 @@ Description:
 
 #### **环境预研**
 
-在开发前，通过打印当前系统的 `PATH` 变量，明确其结构：
+&emsp;&emsp;在开发前，通过打印当前系统的 `PATH` 变量，明确其结构：
 ```bash
-yillin@yillin:~/work2/hkw/hw-shell$ echo $PATH
+yillin@yillin:/mnt/d/OS_homework/iaf/hw-shell$ echo $PATH
 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ```
 **结构特征**：`PATH` 是一个由冒号 (`:`) 分隔的目录列表。解析器的核心任务就是对该字符串进行分割（Tokenization）。
 
 #### **程序逻辑**
 
-核心算法采用 **“遍历 — 拼接 — 探测”** 策略：
+&emsp;&emsp;核心算法采用 **“遍历 — 拼接 — 探测”** 策略：
 
 1.  **输入预判**：首先检查用户输入的指令首字符。
     *   若以 `/` 开头（如 `/bin/ls`），判定为绝对路径，直接验证其有效性。
@@ -568,9 +684,10 @@ char *find_real_path(const char *input) {
     *   处理了 `PATH` 环境变量为空的边界情况。
     *   处理了 `malloc` 失败的极端情况，防止内核 Panic。
 
-此模块实现后，Shell 具备了类似 Bash 的命令查找能力，用户输入 `ls` 时，系统会自动映射执行 `/bin/ls`，极大地提升了交互体验。
+&emsp;&emsp;此模块实现后，Shell 具备了类似 Bash 的命令查找能力，用户输入 `ls` 时，系统会自动映射执行 `/bin/ls`，极大地提升了交互体验。
 
 ***
+
 
 
 ### **任务四：Input/Output Redirection —— 标准 I/O 重定向**
@@ -673,14 +790,14 @@ Description:
 
 #### **核心概念：信号 (Signals)**
 
-信号是 UNIX 系统中进程间通信（IPC）的一种异步机制。本任务主要关注以下几种：
+&emsp;&emsp;信号是 UNIX 系统中进程间通信（IPC）的一种异步机制。本任务主要关注以下几种：
 *   **SIGINT (Ctrl-C)**: 中断信号。旨在终止当前任务。
 *   **SIGTSTP (Ctrl-Z)**: 挂起信号。旨在暂停当前任务（Shell 可随后通过 `fg` 恢复它）。
 *   **SIGTTOU**: 当后台进程组尝试向终端写数据时触发。
 
 #### **程序逻辑与设计模式**
 
-为了实现上述目标，采用如下的**父子协作模型**：
+&emsp;&emsp;为了实现上述目标，采用如下的**父子协作模型**：
 
 1.  **子进程 (Child)**：
     *   **独立门户**：调用 `setpgid(0, 0)` 将自己提升为新进程组的组长（Process Group Leader）。这是作业控制的基石。
@@ -693,7 +810,7 @@ Description:
 
 #### **主要函数实现**
 
-以下代码展示了完整的进程启动与信号控制逻辑（集成在 `run_external_prog` 中）：
+&emsp;&emsp;以下代码展示了完整的进程启动与信号控制逻辑（集成在 `run_external_prog` 中）：
 
 ```C
 /* Shell 进程启动核心逻辑 */
@@ -774,10 +891,9 @@ return 0;
 ***
 
 
+## **HW3: Threads (内核线程管理)**
 
-## HW3: Threads (内核线程管理)
-
-`proj1-threads` 模块的核心目标是增强 Pintos 内核的线程调度子系统。主要包含三个核心任务（Mission）：
+&emsp;&emsp;`proj1-threads` 模块的核心目标是增强 Pintos 内核的线程调度子系统。主要包含三个核心任务（Mission）：
 
 1.  **Alarm Clock**（高效的睡眠唤醒机制）
 2.  **Priority Scheduling**（基于优先级的抢占式调度与优先级捐赠）
@@ -793,6 +909,10 @@ return 0;
 | palloc    | 物理内存页分配器 (Page Allocator)                        |
 | switch    | 上下文切换汇编实现 (Context Switch)                      |
 | synch     | 同步原语实现 (Semaphore, Lock, Condition Variable)       |
+
+<p align="center">
+  <img src="os2_02.png" width="80%">
+</p>
 
 ### **任务一：Alarm Clock —— 高效唤醒机制**
 
@@ -836,7 +956,7 @@ void thread_yield (void) {
 
 #### **重构设计与实现**
 
-为了实现 **Efficient Alarm Clock**，我们需要在 TCB 中增加状态记录，并利用时钟中断（Timer Interrupt）作为唤醒源。
+&emsp;&emsp;为了实现 **Efficient Alarm Clock**，我们需要在 TCB 中增加状态记录，并利用时钟中断（Timer Interrupt）作为唤醒源。
 
 **Step 1: 扩展线程控制块 (TCB)**
 
@@ -938,8 +1058,8 @@ static void timer_interrupt(struct intr_frame* args UNUSED) {
 ### **任务二：Priority Scheduling —— 优先级调度系统**
 
 **任务背景与设计目标：**
-在 Pintos 的初始设计中，线程调度采用简单的 **FCFS (First-Come, First-Served)** 策略，所有就绪线程被添加到一个 FIFO 队列中。
-然而，实际操作系统通常需要支持**抢占式优先级调度 (Preemptive Priority Scheduling)**。
+&emsp;&emsp;在 Pintos 的初始设计中，线程调度采用简单的 **FCFS (First-Come, First-Served)** 策略，所有就绪线程被添加到一个 FIFO 队列中。
+&emsp;&emsp;然而，实际操作系统通常需要支持**抢占式优先级调度 (Preemptive Priority Scheduling)**。
 *   **优先级定义**：范围 `PRI_MIN (0)` 到 `PRI_MAX (63)`，数值越大代表优先级越高。
 *   **核心需求**：
     1.  **优先级有序**：就绪队列（Ready List）必须始终保持有序，确保队头永远是优先级最高的线程。
@@ -955,11 +1075,11 @@ static void timer_interrupt(struct intr_frame* args UNUSED) {
 
 	3. **优先级捐赠**：为Pintos的锁实现优先级捐赠功能。当高优先级线程（H）需要获取已被低优先级线程（L）持有的锁时，临时提升L的优先级至H的优先级，以防止优先级倒置问题，即防止中优先级线程M在等待低优先级线程L持有的资源时获得执行权。还需处理嵌套提升情况：如果H等待M持有的锁，而M等待L持有的锁，则M和L的优先级都应提升至H的优先级。如有需要，可对嵌套提升的深度设定合理限制，比如设定为8级。
 
----
 
-### **Ⅰ. 优先级队列 (Priority Queue) 的实现**
 
-#### **原有机制分析**
+#### **Ⅰ. 优先级队列 (Priority Queue) 的实现**
+
+##### **原有机制分析**
 
 在原始代码 `thread.c` 中，线程进入就绪状态主要依赖 `list_push_back`：
 
@@ -974,7 +1094,7 @@ void thread_unblock (struct thread *t) {
 
 这种实现导致调度器 `schedule()` 选择下一个线程时（通常取队头），无法保证选出的是优先级最高的线程。
 
-#### **重构策略**
+##### **重构策略**
 
 为了实现优先级调度，我们有两种算法选择：
 1.  **无序插入，有序取出**：插入 $O(1)$，但在 `schedule` 时需遍历队列查找最大值 $O(N)$。
@@ -982,7 +1102,7 @@ void thread_unblock (struct thread *t) {
 
 **决策**：考虑到 Pintos 提供了 `list_insert_ordered` 函数，且取出操作（Context Switch）对延迟非常敏感，我们选择**方案 2（有序插入）**。
 
-#### **核心代码实现**
+##### **核心代码实现**
 
 **Step 1: 定义优先级比较函数**
 
@@ -1095,7 +1215,7 @@ tid_t thread_create(const char *name, int priority, thread_func *function, void 
 通过以上修改，我们构建了一个严格遵守优先级规则的调度核心，任何时刻 CPU 都由就绪队列中优先级最高的线程持有。
 
 
-### **Ⅱ. 线程优先级同步 (Priority Synchronization)**
+#### **Ⅱ. 线程优先级同步 (Priority Synchronization)**
 
 **任务背景与设计目标：**
 在实现优先级调度后，系统中的同步原语（锁、信号量、条件变量）也必须“感知”优先级。
@@ -1106,9 +1226,9 @@ tid_t thread_create(const char *name, int priority, thread_func *function, void 
     3.  **条件变量 (Condition Variable)**：唤醒时，必须选择等待队列中优先级最高的线程。
     4.  **抢占性 (Preemption)**：当一个锁被释放或信号量被 signal 时，如果唤醒的新线程优先级高于当前运行线程，必须立即进行上下文切换。
 
----
 
-#### **Part 1. 信号量 (Semaphore) 的优先级改造**
+
+##### **Part 1. 信号量 (Semaphore) 的优先级改造**
 
 信号量是 Pintos 中最基础的同步机制（锁也是基于它实现的）。
 
@@ -1169,9 +1289,9 @@ void sema_up(struct semaphore *sema) {
 }
 ```
 
----
 
-#### **Part 2. 条件变量 (Condition Variable) 的优先级改造**
+
+##### **Part 2. 条件变量 (Condition Variable) 的优先级改造**
 
 条件变量的等待队列比较特殊，它存储的不是 `struct thread`，而是 `struct semaphore_elem`。每个等待者本质上都在等待一个私有的信号量。
 
@@ -1214,9 +1334,9 @@ void cond_signal (struct condition *cond, struct lock *lock UNUSED) {
 }
 ```
 
----
 
-#### **Part 3. 动态优先级调整 (`thread_set_priority`)**
+
+##### **Part 3. 动态优先级调整 (`thread_set_priority`)**
 
 允许线程在运行时修改自身优先级。这一操作可能触发立即抢占（如果降低了优先级）或重新排序。
 
@@ -1249,7 +1369,7 @@ void thread_set_priority(int new_priority) {
 通过上述改造，Pintos 的同步子系统完全具备了“优先级感知”能力。高优先级线程在争夺锁、信号量或等待条件满足时，将获得绝对的优先权，从而最大限度地减少了关键任务的等待延迟。
 
 
-### **Ⅲ. 优先级捐赠 (Priority Donation)**
+#### **Ⅲ. 优先级捐赠 (Priority Donation)**
 
 **任务背景与核心挑战：**
 在严格的优先级调度系统中，极其容易出现 **“优先级反转 (Priority Inversion)”** 现象。
@@ -1265,9 +1385,13 @@ void thread_set_priority(int new_priority) {
 2.  **多重捐赠 (Multiple Donation)**：一个线程持有多个锁，被多个高优先级线程等待。此时该线程的优先级应为 max(自身基础优先级, 所有等待者中的最高优先级)。
 3.  **嵌套捐赠 (Nested Donation)**：`H` 等待 `M` (持锁 A)，`M` 等待 `L` (持锁 B)。此时 `H` 的优先级应传递给 `M`，再传递给 `L`。
 
----
+优先级捐赠逻辑流程图如下:
 
-#### **Part 1. 数据结构扩展**
+<p align="center">
+  <img src="os2_01.png" width="82%">
+</p>
+
+##### **Part 1. 数据结构扩展**
 
 为了支持上述复杂的捐赠逻辑，我们需要在 `struct thread` 和 `struct lock` 中增加状态记录。
 
@@ -1294,11 +1418,11 @@ struct lock {
 };
 ```
 
----
 
-#### **Part 2. 核心逻辑实现**
 
-##### **1. 捐赠优先级的计算 (`thread_update_priority`)**
+##### **Part 2. 核心逻辑实现**
+
+###### **1. 捐赠优先级的计算 (`thread_update_priority`)**
 
 当一个线程持有的锁被释放，或者有新的高优先级线程等待它持有的锁时，我们需要重新计算该线程的当前优先级。
 *   **规则**：`priority = max(base_priority, max(所有持有锁的 max_priority))`
@@ -1321,7 +1445,7 @@ void thread_update_priority(struct thread *t) {
 }
 ```
 
-##### **2. 锁的获取与嵌套捐赠 (`lock_acquire`)**
+###### **2. 锁的获取与嵌套捐赠 (`lock_acquire`)**
 
 这是优先级捐赠发生的最主要场所。
 
@@ -1388,7 +1512,7 @@ void lock_acquire (struct lock *lock) {
 }
 ```
 
-##### **3. 锁的释放与优先级恢复 (`lock_release`)**
+###### **3. 锁的释放与优先级恢复 (`lock_release`)**
 
 当线程释放锁时，必须撤销该锁带来的优先级捐赠效果。
 
@@ -1410,7 +1534,7 @@ void lock_release(struct lock *lock) {
 }
 ```
 
-##### **4. 辅助函数实现**
+###### **4. 辅助函数实现**
 
 *   **`thread_donate_priority`**: 封装了优先级更新和就绪队列重排的操作。
     ```c
@@ -1452,9 +1576,9 @@ void lock_release(struct lock *lock) {
 ***
 
 
-### **任务三：Advanced Scheduler —— 多级反馈队列调度 (MLFQS)**
+#### **任务三：Advanced Scheduler —— 多级反馈队列调度 (MLFQS)**
 
-#### **1. 设计哲学与核心理念 (Design Rationale)**
+##### **1. 设计哲学与核心理念 (Design Rationale)**
 
 在 Project 1 的前两个任务中，我们实现了基于优先级的调度。然而，传统的优先级调度存在一个致命缺陷：**它依赖于外部（用户或管理员）显式地设定优先级**。
 *   **局限性**：如果系统无法预知一个线程是计算密集型（CPU Bound）还是 I/O 密集型（I/O Bound），就无法赋予其合理的优先级。赋予计算密集型任务高优先级会导致 I/O 任务响应迟钝；反之，则可能导致计算任务饥饿。
@@ -1465,7 +1589,8 @@ void lock_release(struct lock *lock) {
         *   **惩罚霸占**：如果一个线程总是耗尽分配给它的时间片（Tick），系统认为它是计算密集型任务，降低其优先级，将其“下放”到低优先级队列，避免其长期霸占 CPU。
     3.  **自动衰减**：随着时间推移，所有线程积累的“CPU 使用记录”会逐渐衰减。这确保了如果一个计算密集型任务转变为交互型任务，其优先级也能随之恢复。
 
-#### **2. 技术难点：内核定点数运算 (Fixed-Point Arithmetic)**
+
+##### **2. 技术难点：内核定点数运算 (Fixed-Point Arithmetic)**
 
 **为什么需要定点数？**
 在 Pintos（以及大多数操作系统内核）中，**严禁使用浮点数（Floating Point Numbers）**。
@@ -1495,7 +1620,7 @@ typedef int fixed_point_t;
                            : ((A - (1 << (FP_SHIFT_AMOUNT - 1))) >> FP_SHIFT_AMOUNT)) // 四舍五入
 ```
 
-#### **3. 数学模型与公式推导 (Mathematical Model)**
+##### **3. 数学模型与公式推导 (Mathematical Model)**
 
 MLFQS 的运作依赖于三个关键变量的联动更新：`priority`、`recent_cpu` 和 `load_avg`。
 
@@ -1519,7 +1644,7 @@ $$ load\_avg(t) = \frac{59}{60} \times load\_avg(t-1) + \frac{1}{60} \times read
     *   该公式模拟了 UNIX 系统中 `uptime` 命令显示的 1 分钟平均负载。
     *   它平滑了负载的瞬间波动，使得调度器不会因为瞬间的峰值而剧烈震荡。
 
-#### **4. 关键函数实现与流程控制**
+##### **4. 关键函数实现与流程控制**
 
 调度器的核心驱动力来自时钟中断。为了平衡系统开销与调度精度，我们采用分频策略来更新不同的变量。
 
@@ -1626,9 +1751,9 @@ void mlfqs_recalc_priority(struct thread *t) {
 MLFQS 模块的实现不仅是对编程能力的考验，更是对计算机系统底层原理的深刻实践。通过**定点数库**的构建，解决了内核态浮点运算的难题；通过**指数加权移动平均**算法的应用，实现了调度器对系统负载的自适应感知。最终实现的调度器能够在高并发场景下，自动识别并平衡 I/O 密集型与计算密集型任务，达到了吞吐量与响应时间的双重优化。
 ***
 
-### ** Threads —— 实验总结与核心收获**
+#### **Threads —— 实验总结与核心收获**
 
-#### **1. 成果综述**
+##### **1. 成果综述**
 经过对 Pintos 内核线程子系统的深度改造，我成功构建了一个具备**高效唤醒、严格优先级调度、以及智能反馈机制**的现代化内核调度器。
 *   **功能完整性**：三个核心 Mission（Alarm Clock, Priority Scheduling, Advanced Scheduler）全部按设计要求实现。
 *   **性能指标**：
@@ -1637,7 +1762,7 @@ MLFQS 模块的实现不仅是对编程能力的考验，更是对计算机系�
     *   **MLFQS**：构建了基于 17.14 定点数运算的反馈调度器，能在无人工干预下自动平衡 I/O 密集型与计算密集型任务。
 *   **测试结果**：在 Stanford 官方提供的 Autograder 评测中，本模块通过了所有 **27 个** 测试点（包括最棘手的 `priority-donate-chain` 和 `mlfqs-load-avg`）。
 
-#### **2. 技术难点与解决方案回顾**
+##### **2. 技术难点与解决方案回顾**
 
 | 核心挑战 | 遇到的问题 (Problem) | 解决方案 (Solution) | 关键技术点 |
 | :--- | :--- | :--- | :--- |
@@ -1646,7 +1771,7 @@ MLFQS 模块的实现不仅是对编程能力的考验，更是对计算机系�
 | **优先级反转** | 低优先级线程持有锁，阻碍高优先级线程运行（如 H 等 M，M 等 L）。 | **优先级捐赠**：实现递归捐赠算法。H 将优先级传给 M，M 传给 L，直到锁释放。 | `recursive donation`, `lock_acquire` |
 | **内核浮点运算** | MLFQS 算法依赖小数计算，但内核态禁用硬件 FPU。 | **定点数算术**：自行实现 17.14 格式的定点数库，用整数位移模拟小数运算。 | `Fixed-Point Arithmetic`, `Q17.14` |
 
-#### **3. 深度思考 (Insights)**
+##### **3. 深度思考 (Insights)**
 
 通过本次实验，我对操作系统内核的设计哲学有了更深层次的理解：
 
@@ -1661,10 +1786,10 @@ MLFQS 模块的实现不仅是对编程能力的考验，更是对计算机系�
 3.  **系统性能的权衡 (Trade-offs)**：
     *   在 MLFQS 实现中，我们选择了每 4 个 Tick 更新一次优先级，而不是每 1 个 Tick。这就是一种权衡：过于频繁的计算会消耗过多的 CPU 时间用于“管理”而非“运行程序”，而过于稀疏的更新则会导致调度滞后。操作系统设计本质上就是在一系列 Trade-offs 中寻找最优解。
 
-#### **4. 未来展望**
-虽然目前的调度器已经相当完善，但在多核（Multi-core）环境下，全局唯一的 `ready_list` 会成为巨大的锁竞争瓶颈。如果未来将 Pintos 扩展为 SMP（对称多处理）架构，我将考虑为每个 CPU 核心设计独立的运行队列（Per-CPU Runqueue），并引入任务窃取（Work Stealing）机制以进一步提升并行效率。
+##### **4. 未来展望**
+&emsp;&emsp;虽然目前的调度器已经相当完善，但在多核（Multi-core）环境下，全局唯一的 `ready_list` 会成为巨大的锁竞争瓶颈。如果未来将 Pintos 扩展为 SMP（对称多处理）架构，我将考虑为每个 CPU 核心设计独立的运行队列（Per-CPU Runqueue），并引入任务窃取（Work Stealing）机制以进一步提升并行效率。
 
-至此，Threads功能已经实现，在判题机上取得37分。
+&emsp;&emsp;至此，Threads功能已经实现，在判题机上取得37分。
 
 ***
 
@@ -1674,11 +1799,11 @@ MLFQS 模块的实现不仅是对编程能力的考验，更是对计算机系�
 
 ##### Source Files
 
-本项目的开发工作主要集中在 `userprog` 目录下。其中，`process.c` 和 `process.h` 是进程生命周期的核心，负责加载 ELF 格式的二进制文件并启动进程；`pagedir.c` 及其头文件则提供了一个简单的 80x86 硬件页表管理器，用于处理虚拟地址到物理地址的映射。系统调用的处理框架位于 `syscall.c` 中，这是用户态通往内核态的桥梁。目前该文件仅包含一个基础骨架，通过打印消息并终止进程来响应调用。我们的任务是扩充此文件，实现文件操作、进程控制等全套系统调用。此外，`exception.c` 负责捕获并处理用户进程触发的异常（如非法指令或缺页故障），这对于保证内核的稳健性至关重要。
+&emsp;&emsp;本项目的开发工作主要集中在 `userprog` 目录下。其中，`process.c` 和 `process.h` 是进程生命周期的核心，负责加载 ELF 格式的二进制文件并启动进程；`pagedir.c` 及其头文件则提供了一个简单的 80x86 硬件页表管理器，用于处理虚拟地址到物理地址的映射。系统调用的处理框架位于 `syscall.c` 中，这是用户态通往内核态的桥梁。目前该文件仅包含一个基础骨架，通过打印消息并终止进程来响应调用。我们的任务是扩充此文件，实现文件操作、进程控制等全套系统调用。此外，`exception.c` 负责捕获并处理用户进程触发的异常（如非法指令或缺页故障），这对于保证内核的稳健性至关重要。
 
-为了支持程序的加载与运行，本项目还需与文件系统进行深度交互。虽然重点并非文件系统的实现，但内核必须借助 `filesys` 目录下的基础文件系统接口（如 `filesys.h` 和 `file.h`）来读取可执行文件，并实现相关的文件操作系统调用。理解这些接口的限制对于正确实现用户程序加载器至关重要。
+&emsp;&emsp;为了支持程序的加载与运行，本项目还需与文件系统进行深度交互。虽然重点并非文件系统的实现，但内核必须借助 `filesys` 目录下的基础文件系统接口（如 `filesys.h` 和 `file.h`）来读取可执行文件，并实现相关的文件操作系统调用。理解这些接口的限制对于正确实现用户程序加载器至关重要。
 
-在“`userprog`”中，大部分工作要做的地方:
+&emsp;&emsp;在“`userprog`”中，大部分工作要做的地方:
 
 | 文件                                | 操作                                                         |
 | ----------------------------------- | ------------------------------------------------------------ |
@@ -1691,26 +1816,26 @@ MLFQS 模块的实现不仅是对编程能力的考验，更是对计算机系�
 
 ##### **使用文件系统**
 
-需要连接到本项目的文件系统的代码，因为用户程序是从文件系统加载的，许多系统调用必须实现处理文件系统。然而，本项目的重点不是文件系统, 所以在“`filesys`”目录下提供了一个简单但完整的文件系统. “`filesys.h`” and “`file.h`”接口帮助理解如何使用文件系统，特别是它的很多限制
+&emsp;&emsp;需要连接到本项目的文件系统的代码，因为用户程序是从文件系统加载的，许多系统调用必须实现处理文件系统。然而，本项目的重点不是文件系统, 所以在“`filesys`”目录下提供了一个简单但完整的文件系统. “`filesys.h`” and “`file.h`”接口帮助理解如何使用文件系统，特别是它的很多限制
 
 ##### **Virtual Memory Layout**
-Pintos中的虚拟内存分为两个区域：用户虚拟内存和内核虚拟内存。用户虚拟内存的范围从虚拟地址0到“PHYS_BASE”（在“threads/vaddr.h”中定义），默认为“ 0xc0000000”（3GB）。内核虚拟内存占用了其余的虚拟地址空间，从“PHYS_BASE”到最大4GB。
+&emsp;&emsp;Pintos中的虚拟内存分为两个区域：用户虚拟内存和内核虚拟内存。用户虚拟内存的范围从虚拟地址0到“PHYS_BASE”（在“threads/vaddr.h”中定义），默认为“ 0xc0000000”（3GB）。内核虚拟内存占用了其余的虚拟地址空间，从“PHYS_BASE”到最大4GB。
 
-用户虚拟内存是每个进程私有的。当内核执行进程切换时，必须调用 `pagedir_activate()` 修改 CPU 的页目录基址寄存器（CR3），从而切换用户地址空间。每个进程的 `struct thread` 结构体中都保存了指向其页表的指针。与之相对，内核虚拟内存是全局共享的，它通过一对一映射（One-to-One Mapping）的方式直接映射到物理内存，即虚拟地址 `PHYS_BASE + Offset` 直接对应物理地址 `0 + Offset`。这种设计简化了内核对物理内存的访问。
+&emsp;&emsp;用户虚拟内存是每个进程私有的。当内核执行进程切换时，必须调用 `pagedir_activate()` 修改 CPU 的页目录基址寄存器（CR3），从而切换用户地址空间。每个进程的 `struct thread` 结构体中都保存了指向其页表的指针。与之相对，内核虚拟内存是全局共享的，它通过一对一映射（One-to-One Mapping）的方式直接映射到物理内存，即虚拟地址 `PHYS_BASE + Offset` 直接对应物理地址 `0 + Offset`。这种设计简化了内核对物理内存的访问。
 
-内存保护机制是本项目的关键。用户程序仅被允许访问其私有的低 3GB 空间，任何对 `PHYS_BASE` 以上内核空间的访问尝试都会触发页面错误（Page Fault），并由 `page_fault()` 处理函数终止违规进程。虽然内核线程拥有访问所有内存的权限，但当它代用户程序访问未映射的用户地址时，同样会触发缺页异常，需要谨慎处理。
+&emsp;&emsp;内存保护机制是本项目的关键。用户程序仅被允许访问其私有的低 3GB 空间，任何对 `PHYS_BASE` 以上内核空间的访问尝试都会触发页面错误（Page Fault），并由 `page_fault()` 处理函数终止违规进程。虽然内核线程拥有访问所有内存的权限，但当它代用户程序访问未映射的用户地址时，同样会触发缺页异常，需要谨慎处理。
 
 
-用户虚拟内存是按进程管理的。当内核从一个进程切换到另一个进程时，它还会通过更改处理器的页目录基址寄存器来切换用户虚拟地址空间（请参阅“userprog/pagedir.c”中的“pagedir_activate()”）。“struct thread”包含指向进程的页表的指针。
+&emsp;&emsp;用户虚拟内存是按进程管理的。当内核从一个进程切换到另一个进程时，它还会通过更改处理器的页目录基址寄存器来切换用户虚拟地址空间（请参阅“userprog/pagedir.c”中的“pagedir_activate()”）。“struct thread”包含指向进程的页表的指针。
 
-内核虚拟内存是全局的。无论运行什么用户进程或内核线程，它始终以相同的方式映射。在Pintos中，内核虚拟内存从“PHYS_BASE”开始一对一映射到物理内存。也就是说，虚拟地址“PHYS_BASE”访问物理地址0，虚拟地址“PHYS_BASE”+“0x1234”访问物理地址“0x1234”，依此类推，直到机器的物理内存大小为止。
+&emsp;&emsp;内核虚拟内存是全局的。无论运行什么用户进程或内核线程，它始终以相同的方式映射。在Pintos中，内核虚拟内存从“PHYS_BASE”开始一对一映射到物理内存。也就是说，虚拟地址“PHYS_BASE”访问物理地址0，虚拟地址“PHYS_BASE”+“0x1234”访问物理地址“0x1234”，依此类推，直到机器的物理内存大小为止。
 
-用户程序只能访问其自己的用户虚拟内存。尝试访问内核虚拟内存会导致页面错误，由“userprog/exception.c”中的“page_fault()”处理，该进程将终止。内核线程可以访问内核虚拟内存，也可以访问正在运行的进程的用户虚拟内存（如果用户进程正在运行）。但是，即使在内核中，尝试以未映射的用户虚拟地址访问内存也会导致页面错误。
+&emsp;&emsp;用户程序只能访问其自己的用户虚拟内存。尝试访问内核虚拟内存会导致页面错误，由“userprog/exception.c”中的“page_fault()”处理，该进程将终止。内核线程可以访问内核虚拟内存，也可以访问正在运行的进程的用户虚拟内存（如果用户进程正在运行）。但是，即使在内核中，尝试以未映射的用户虚拟地址访问内存也会导致页面错误。
 
 ##### **Typical Memory Layout**
-一个标准用户进程的内存布局具有明确的结构：代码段（Code Segment）通常起始于 `0x08048000`；紧接着是已初始化数据段和未初始化数据段（BSS）；堆栈（Stack）则位于用户空间的顶部 `PHYS_BASE` 之下，并向低地址方向增长。而在堆栈与数据段之间，是用于堆（Heap）增长的自由空间。在本项目中，用户栈的大小是固定的，但在后续的项目中将支持动态扩展。
+&emsp;&emsp;一个标准用户进程的内存布局具有明确的结构：代码段（Code Segment）通常起始于 `0x08048000`；紧接着是已初始化数据段和未初始化数据段（BSS）；堆栈（Stack）则位于用户空间的顶部 `PHYS_BASE` 之下，并向低地址方向增长。而在堆栈与数据段之间，是用于堆（Heap）增长的自由空间。在本项目中，用户栈的大小是固定的，但在后续的项目中将支持动态扩展。
 
-从概念上讲，每个进程都可以随意选择自己的用户虚拟内存。 实际上，用户虚拟内存的布局是这样的:
+&emsp;&emsp;从概念上讲，每个进程都可以随意选择自己的用户虚拟内存。 实际上，用户虚拟内存的布局是这样的:
 
 ```sql
    PHYS_BASE +----------------------------------+
@@ -1742,31 +1867,37 @@ Pintos中的虚拟内存分为两个区域：用户虚拟内存和内核虚拟�
            0 +----------------------------------+
 ```
 
-在本项目中，用户堆栈的大小是固定的，但在项目3中，将允许其增长。传统上，未初始化的数据段的大小可以通过系统调用来调整，但是您不必实现这一点。
+&emsp;&emsp;在本项目中，用户堆栈的大小是固定的，但在项目3中，将允许其增长。传统上，未初始化的数据段的大小可以通过系统调用来调整，但是您不必实现这一点。
 
 ##### **Accessing User Memory**
 
-作为系统调用的一部分，内核必须经常通过用户程序提供的指针访问内存。内核必须非常小心，因为用户可能传递一个空指针，一个指向未映射虚拟内存的指针或一个指向内核虚拟地址空间的指针（在PHYS_BASE之上）。必须通过终止有问题的进程并释放其资源，拒绝所有这些类型的无效指针，而不会损害内核或其他正在运行的进程。
+&emsp;&emsp;作为系统调用的一部分，内核必须经常通过用户程序提供的指针访问内存。内核必须非常小心，因为用户可能传递一个空指针，一个指向未映射虚拟内存的指针或一个指向内核虚拟地址空间的指针（在PHYS_BASE之上）。必须通过终止有问题的进程并释放其资源，拒绝所有这些类型的无效指针，而不会损害内核或其他正在运行的进程。
 
-至少有两种合理的方法可以正确地执行此操作。第一种方法是验证用户提供的指针的有效性，然后解引用它。如果选择此路线，则需要查看“userprog/pagedir.c”和“threads/vaddr.h”中的功能。这是处理用户内存访问的最简单方法。
+&emsp;&emsp;至少有两种合理的方法可以正确地执行此操作。第一种方法是验证用户提供的指针的有效性，然后解引用它。如果选择此路线，则需要查看“userprog/pagedir.c”和“threads/vaddr.h”中的功能。这是处理用户内存访问的最简单方法。
 
-第二种方法是仅检查用户指针是否指向“PHYS_BASE”下方，然后解引用。无效的用户指针将导致“页面错误”，您可以通过修改“userprog/exception.c”中的“page_fault()”的代码来处理。该技术通常更快，因为它利用了处理器的MMU,因此倾向于在实际内核（包括Linux）中使用。
+&emsp;&emsp;第二种方法是仅检查用户指针是否指向“PHYS_BASE”下方，然后解引用。无效的用户指针将导致“页面错误”，您可以通过修改“userprog/exception.c”中的“page_fault()”的代码来处理。该技术通常更快，因为它利用了处理器的MMU,因此倾向于在实际内核（包括Linux）中使用。
 
-在实现系统调用时，内核必须频繁读写用户程序提供的指针数据。这是一个高风险操作，因为恶意或有缺陷的用户程序可能传递空指针、指向未映射区域的指针，甚至是指向内核空间的指针。为了确保系统稳定性，内核必须能够识别并拒绝这些非法指针，同时安全地终止违规进程并回收资源。
+&emsp;&emsp;在实现系统调用时，内核必须频繁读写用户程序提供的指针数据。这是一个高风险操作，因为恶意或有缺陷的用户程序可能传递空指针、指向未映射区域的指针，甚至是指向内核空间的指针。为了确保系统稳定性，内核必须能够识别并拒绝这些非法指针，同时安全地终止违规进程并回收资源。
 
-实现安全的内存访问主要有两种策略。第一种是“先验证后访问”，即利用页目录查询功能验证指针的有效性后再进行解引用。这种方法逻辑简单，适合初学者。第二种是“直接访问并捕获异常”，即仅检查指针是否位于用户空间（小于 `PHYS_BASE`），然后直接尝试访问。利用处理器的 MMU 机制，非法访问会自动触发缺页异常。此时，我们需要修改 `page_fault()` 函数，在异常处理程序中识别出这是源于系统调用的非法访问，并安全地恢复内核状态（类似于 Linux 内核中的 `get_user`/`put_user` 机制）。无论采用何种策略，核心原则都是防止资源泄漏：即使在处理非法指针导致进程终止时，之前已分配的锁或内存也必须被正确释放。
-
-
-无论哪种情况，都需要确保不要“泄漏”资源。例如，假设您的系统调用已使用`malloc()`获得了锁定或分配的内存。如果之后遇到无效的用户指针，则仍必须确保释放锁定或释放内存页面。如果选择解引用用户指针之前先对其进行验证，则这应该很简单。如果无效指针导致页面错误，则更难处理，因为无法从内存访问中返回错误代码。
+&emsp;&emsp;实现安全的内存访问主要有两种策略。第一种是“先验证后访问”，即利用页目录查询功能验证指针的有效性后再进行解引用。这种方法逻辑简单，适合初学者。第二种是“直接访问并捕获异常”，即仅检查指针是否位于用户空间（小于 `PHYS_BASE`），然后直接尝试访问。利用处理器的 MMU 机制，非法访问会自动触发缺页异常。此时，我们需要修改 `page_fault()` 函数，在异常处理程序中识别出这是源于系统调用的非法访问，并安全地恢复内核状态（类似于 Linux 内核中的 `get_user`/`put_user` 机制）。无论采用何种策略，核心原则都是防止资源泄漏：即使在处理非法指针导致进程终止时，之前已分配的锁或内存也必须被正确释放。
 
 
-针对`proj2-userprog`，我们的开发工作将围绕以下四个核心 Mission 展开：
+&emsp;&emsp;无论哪种情况，都需要确保不要“泄漏”资源。例如，假设系统调用已使用`malloc()`获得了锁定或分配的内存。如果之后遇到无效的用户指针，则仍必须确保释放锁定或释放内存页面。如果选择解引用用户指针之前先对其进行验证，则这应该很简单。如果无效指针导致页面错误，则更难处理，因为无法从内存访问中返回错误代码。
+
+
+&emsp;&emsp;针对`proj2-userprog`，我们的开发工作将围绕以下四个核心 Mission 展开：
 
 1.  **Process Termination Messages（进程终止消息）**：确保每个用户进程在退出时，内核能向控制台打印包含进程名和退出码的标准化消息，以便追踪进程生命周期。
 2.  **Argument Passing（参数传递）**：重构进程启动代码，实现将命令行参数正确解析并压入用户栈，使程序能像 C 语言标准那样通过 `argc` 和 `argv` 获取输入。
 3.  **System Calls（系统调用）**：这是工作量最大的部分，需要实现包括文件读写、进程等待与退出在内的一系列核心系统调用，确立用户态与内核态的交互标准。
 4.  **Denying Writes to Executables（禁止写入正在运行的可执行文件）**：为了保证程序运行的一致性，必须在程序运行时锁定对应的可执行文件，防止其在内存加载期间被外部修改。
 
+
+<p align="center">
+  <img src="os33_01.png" width="95%">
+</p>
+
+***
 ### **任务一：Process Termination Messages——处理终端信息**
 
     Description:每当用户进程终止时，不管是因为它调用exit或任何其他原因，请打印该进程的名称和退出代码，其格式类似于由printf（“％s：exit（％d）\ n”，... ）;。 打印的名称应为传递给process_execute（）的全名，并省略命令行参数。当不是用户进程的内核线程终止时，或者在调用“halt”系统调用时，请勿打印这些消息。当进程无法加载时，此消息是可选的。	
@@ -1906,7 +2037,7 @@ void process_exit(int exit_code) {
 }
 ```
 
-​**改进后的 `process_exit` 实现解析**
+**改进后的 `process_exit` 实现解析**
 
 相较于原始版本，重构后的 `process_exit` 函数已经演变为一个功能完备的进程终止例程，它不仅负责自身的资源回收，还妥善处理了与父进程及子进程的同步关系，具体增强体现在以下几个关键方面：
 
@@ -1938,7 +2069,7 @@ void process_exit(int exit_code) {
 
 #### 思路分析：
 
-​
+
 在 UNIX-like 操作系统中，当用户在 Shell 中输入一条命令（如 `/bin/ls -l foo`）时，操作系统不仅要加载可执行文件，还需要将命令行参数传递给新进程的主函数 `main(int argc, char *argv[])`。在 Pintos 的初始实现中，`process_execute` 仅能处理不带参数的程序名，因为它直接将整个命令行字符串视为文件名。本任务的目标是重构进程启动流程，实现标准的参数传递机制。
 
 核心原理在于**用户栈（User Stack）的构造**。按照 x86 调用约定（Calling Convention），在用户程序开始执行前，内核必须手动将参数字符串、参数指针数组（argv）、以及参数个数（argc）预先压入初始线程的堆栈中。当 CPU 切换到用户态并跳转到程序入口点（Entry Point）时，程序能够直接从栈顶弹出这些数据。
@@ -1999,38 +2130,106 @@ void process_exit(int exit_code) {
 
 **执行流程图解**
 
-下图展示了从 `process_execute` 开始，到用户程序 `main` 函数准备好执行的完整调用链路。其中，虚线框内的 `push_argument` 模块是我们重构的核心，负责将解析后的参数按照 ABI 规范填充到用户栈中。
+下图展示了从 `process_execute` 被调用开始，到用户程序正式执行（Start）的完整生命周期。整个流程分为**内核预处理**、**程序加载**、**栈帧构建**和**最终跳转**四个阶段。
 
-```mermaid
-flowchart TD
-    A["process_execute(cmd_line)"] --> B["解析命令行参数"]
-    B --> C["thread_create()"]
-    C --"新线程"--> D["start_process()"]
-    D --> E["load(file_name)"]
-    E --> F["setup_stack()"]
-    F --> G["push_argument()"]
-    
-    G --"1.压入字符串"--> H["用户栈: Strings"]
-    H --"2.栈对齐"--> I["用户栈: Alignment"]
-    I --"3.压入指针数组"--> J["用户栈: argv[]"]
-    J --"4.压入argc/argv"--> K["用户栈: Main Args"]
-    K --"5.压入返回地址"--> L["准备完毕"]
-    
-    L --> M{"加载成功?"}
-    M --Yes--> N["跳转用户入口"]
-    M --No--> O["process_exit()"]
-```
+![参数传递图](os3_02.png)
 
-**图解说明：**
-1.  **解析阶段**：`process_execute` 负责初步的字符串分割。
-2.  **加载阶段**：`start_process` 驱动整个加载流程，`load` 函数负责读取 ELF 文件。
-3.  **压栈阶段**：`push_argument`（图中粉色高亮部分）是我们在 `setup_stack` 后插入的关键逻辑，它严格按照逆序将数据压入栈中。
-4.  **执行阶段**：如果压栈成功且 `esp` 设置正确，CPU 将跳转到用户代码段执行，此时栈顶结构已完全符合 C 语言 `main` 函数的预期。
 
+**详细步骤说明：**
+1.  **内核预处理阶段**：
+    *   **`process_execute("grep foo")`**：内核线程开始执行。
+    *   **拷贝文件名 (`palloc_get_page`)**：为了防止竞态条件，首先将传入的命令行字符串拷贝到内核页中。
+    *   **解析字符串 (`strtok_r`)**：这是关键的一步。系统调用 `strtok_r` 将命令行切分为程序名（"grep"）和参数（"foo"）。程序名用于创建线程，而完整的字符串用于后续传参。
+
+2.  **程序加载与同步阶段**：
+    *   **`load()` 加载判断**：子进程尝试从磁盘加载 ELF 可执行文件。
+        *   **若加载失败（否）**：执行 `sema_up (失败)` 唤醒父进程，父进程获知失败后**返回 -1**。
+        *   **若加载成功（是）**：继续执行，并调用 `setup_stack` 初始化用户栈。
+
+3.  **栈帧构建阶段（参数压栈核心）**：
+    这是图中最核心的矩形区域，严格遵循 x86 ABI 规范，按以下顺序执行：
+    *   **1. 逆序压入参数内容 (String)**：将字符串值（如 "foo\0", "grep\0"）从高地址向低地址依次压入栈中。
+    *   **2. 栈指针对齐 (Word Align)**：移动栈指针，确保当前的 `esp` 是 4 的倍数（为了性能优化）。
+    *   **3. 压入字符串地址 (`argv[i]`)**：将第一步中压入的字符串的物理地址（指针）依次压入栈中，并压入一个 NULL 指针作为数组结尾。
+    *   **4. 压入 `argv`, `argc`, `ret_addr`**：最后压入 `argv` 的首地址、参数个数 `argc` 以及伪造的返回地址 `ret_addr` (0)。
+
+4.  **启动完成阶段**：
+    *   **`sema_up (成功)`**：栈构建完成后，唤醒父进程，告知其子进程已准备就绪。
+    *   **跳转用户程序入口 (Start)**：通过 `intr_exit` 模拟中断返回，CPU 跳转到用户程序的 `main` 函数开始执行。
 
 #### 原函数分析：
+##### 1. `process_execute`:
 
-##### 1.` process_execute`:
+```c
+pid_t process_execute(const char* file_name) {
+  char* fn_copy;
+  tid_t tid;
+
+  /* Make a copy of FILE_NAME.
+     Otherwise there's a race between the caller and load(). */
+  fn_copy = palloc_get_page(0);
+  if (fn_copy == NULL)
+    return TID_ERROR;
+  strlcpy(fn_copy, file_name, PGSIZE);
+
+  /* --- 关键修改 1: 解析文件名 --- */
+  /* 创建一个临时副本来提取第一个 token（程序名），
+     因为 strtok_r 会修改字符串，而我们需要保留 fn_copy 给子进程传参 */
+  char *cmd_name_copy = palloc_get_page(0);
+  if (cmd_name_copy == NULL) {
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
+  strlcpy(cmd_name_copy, file_name, PGSIZE);
+  
+  char *save_ptr;
+  char *cmd_name = strtok_r(cmd_name_copy, " ", &save_ptr);
+
+  /* Create a new thread to execute FILE_NAME. */
+  /* 注意：这里使用解析出的 cmd_name 作为线程名，但传递 fn_copy (完整命令行) 给子进程 */
+  tid = thread_create(cmd_name, PRI_DEFAULT, start_process, fn_copy);
+  
+  /* 释放临时用于提取名字的内存 */
+  palloc_free_page(cmd_name_copy);
+
+  if (tid == TID_ERROR) {
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
+
+  /* --- 关键修改 2: 父子进程同步 --- */
+  /* 根据流程图，父进程需要等待子进程 load 的结果 (sema_down) */
+  struct thread *cur = thread_current();
+  sema_down(&cur->child_load_sema); // 阻塞，直到子进程调用 sema_up
+
+  /* 检查子进程加载状态 */
+  if (!cur->child_load_success) {
+    return TID_ERROR; // 对应流程图中的 "返回 -1"
+  }
+
+  return tid;
+}
+```
+
+**`process_execute` 函数深度剖析**
+
+`process_execute` 是 Pintos 内核中启动用户进程的入口。根据最新的流程图设计，我们对该函数进行了显著的改进，以解决原始实现中的逻辑缺陷。改进后的执行流程包含以下关键技术细节：
+
+1.  **竞态条件的防御性拷贝 (Defensive Copying)**：
+    与原始实现一致，我们首先调用 `palloc_get_page(0)` 将传入的 `file_name` 复制到内核页 `fn_copy` 中。这确保了子进程拥有独立的数据副本，避免了父进程内存释放导致的“Use-After-Free”风险。
+
+2.  **文件名的提取与解析 (String Parsing)**：
+    这是流程图中新增的关键步骤。原始代码直接将 `"grep foo"` 作为线程名，导致文件系统尝试打开名为 `"grep foo"` 的文件而失败。
+    *   **改进**：我们申请了一个临时的页 `cmd_name_copy`，并使用 `strtok_r` 提取出第一个标记（即 `"grep"`）。
+    *   **策略**：我们将解析出的 `"grep"` 作为 `thread_name` 传递给 `thread_create`，确保线程名正确；同时，将完整的 `"grep foo"` (`fn_copy`) 作为参数传递给 `start_process`，以便子进程后续进行参数压栈。
+
+3.  **父子进程同步 (Synchronization)**：
+    流程图中明确展示了一个判断菱形：“`load()` 加载成功？”以及后续的“返回 -1”。这要求父进程不能在 `thread_create` 后立即返回。
+    *   **机制**：我们在父进程（当前线程）结构中引入了信号量 `child_load_sema`。调用 `thread_create` 后，父进程立即执行 `sema_down` 进入阻塞状态。
+    *   **唤醒**：子进程在 `start_process` 中完成 `load` 操作后（无论成功与否），会设置加载状态标志并执行 `sema_up` 唤醒父进程。
+    *   **结果处理**：父进程被唤醒后，检查加载状态。如果加载失败，函数返回 `TID_ERROR` (-1)；如果成功，才返回子进程的 `tid`。这保证了用户程序在执行时，不仅线程创建成功了，且可执行文件也已正确加载到内存中。
+    
+<!-- ##### 1.` process_execute`:
 
 ```c
 pid_t process_execute(const char* file_name) {
@@ -2053,7 +2252,7 @@ pid_t process_execute(const char* file_name) {
 }
 ```
 
-​ **`process_execute` 函数深度剖析**
+ **`process_execute` 函数深度剖析**
 
 `process_execute` 是 Pintos 内核中启动用户进程的唯一入口点，其核心职责是创建一个新的内核线程，并将其上下文初始化为运行指定的用户程序。该函数的执行流程包含以下关键技术细节：
 
@@ -2073,7 +2272,7 @@ pid_t process_execute(const char* file_name) {
     函数的最后部分处理了资源分配失败的情况。如果线程创建失败（返回 `TID_ERROR`），函数会立即释放之前申请的 `fn_copy` 页，防止内存泄漏，并向调用者返回错误码。
 
 **原始实现的不足**：
-当前的实现有一个显著缺陷：它没有对 `file_name` 进行解析。如果输入字符串是 `"grep foo"`，它会将整个字符串当作文件名去尝试加载，这会导致 `filesys_open` 失败。我们需要在后续修改中引入字符串切割逻辑，分离真正的可执行文件名和命令行参数。
+当前的实现有一个显著缺陷：它没有对 `file_name` 进行解析。如果输入字符串是 `"grep foo"`，它会将整个字符串当作文件名去尝试加载，这会导致 `filesys_open` 失败。我们需要在后续修改中引入字符串切割逻辑，分离真正的可执行文件名和命令行参数。 -->
 
 
 ##### 2.` start_process`:
@@ -2240,7 +2439,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   }
 ```
 
-​ **`load` 函数深度解析：ELF 加载器核心**
+ **`load` 函数深度解析：ELF 加载器核心**
 
 `load` 函数是 Pintos 内核中负责将静态二进制文件转化为动态运行进程的核心组件。它遵循标准的 ELF (Executable and Linkable Format) 规范，执行以下关键步骤：
 
@@ -2407,7 +2606,7 @@ static void start_process(void* newmetadata) {
 }
 ```
 
-​重构后的 `start_process` 函数在原有加载器功能的基础上，大幅扩展了进程控制块（PCB）的初始化逻辑，以支持 Project 2 所需的复杂进程管理特性。
+重构后的 `start_process` 函数在原有加载器功能的基础上，大幅扩展了进程控制块（PCB）的初始化逻辑，以支持 Project 2 所需的复杂进程管理特性。
 
 1.  **全功能 PCB 初始化**：
     除了基础的页目录指针置空操作外，新版函数为进程构建了完整的运行环境：
@@ -2671,7 +2870,7 @@ done:
 
 ​	首先需要为参数和参数指针分配空间，并将参数逆序压入栈中。然后进行堆栈对齐，以满足`x86`架构的要求。然后，将参数指针、参数数量和虚拟地址入栈。最后，根据加载的结果设置是否参加成功，并释放相应的资源。将加载结果存入线程的原始数据中，并唤醒`load`信号量以继续执行`process_execute`函数。
 
-
+***
 
 ### **任务三：System Calls——系统调用**
 
@@ -2721,16 +2920,9 @@ done:
 
 下图是系统调用流程图：
 
-```mermaid
-graph LR
-a[用户操作产生中断]
-b[中断识别]
-c[系统调用类别入栈]
-d["syscall_handler()"]
-e["syscall_init()"]
-f[执行相应的系统调用]
-a-->b-->c-->d-->e-->f
-```
+![系统调用流程图](os3_01.png)
+
+
 
 在实现系统调用时，我们需要访问用户的内存。首先需要判断是否合法。此外，用户程序需要实现同步机制。在实现系统调用时，确保访问用户内存的安全性，并实现进程的同步机制，使得父进程能够等待子进程的结束。除了实现了进程控制的`syscalls`外，我们还应该加入文件操作相关的`syscalls`，补充对以下操作的响应：
 
@@ -3352,8 +3544,434 @@ else if (args[0] == SYS_COMPUTE_E) {
 至此，Userprog已经实现，在判题机上取得97分。
 
 ***
+## **HW5：File System——文件系统**
 
-## 实验总结
+**项目背景与核心流程**
+
+在之前的 Pintos 版本中，文件系统的实现是非常原始的。它仅仅是一个“扁平”的文件系统：所有的文件都存储在同一个根目录下，不支持子目录；文件在创建时必须分配连续的磁盘扇区，且一旦创建，大小就固定无法扩展（不支持文件增长）。此外，系统缺乏缓存机制，每次读写操作都直接访问磁盘，效率低下。
+
+本次实验的目标是将这个玩具级的文件系统通过一系列改进，蜕变为一个功能完备的、类 Unix 的文件系统。核心流程涉及从磁盘块的分配管理（Free Map）、索引节点（Inode）的元数据管理，到上层目录结构（Directory）的维护，最终通过文件系统接口（Filesys）向内核其他部分提供服务。
+
+整个文件系统的操作流程始于用户或内核发出的请求（如 `open`, `write`）。`filesys` 层首先负责解析路径，找到对应的 `inode`；`file` 层维护打开文件的状态（如读写指针）；`inode` 层负责将文件的逻辑偏移量映射到物理磁盘扇区；最后通过 `block` 设备驱动完成实际的 I/O 操作。
+
+在此架构下，我们需要完成以下几个核心子任务：**Buffer Cache（缓冲区缓存）**、**Extensible Files（可扩展文件）** 以及 **Subdirectories（多级目录支持）**。
+
+***
+
+### **任务一：Buffer Cache——缓冲区缓存**
+
+#### **1. 任务背景与架构概览**
+
+在原始的 Pintos 文件系统中，I/O 操作是同步且直接的，这意味着每一次 `inode_read_at` 或 `inode_write_at` 的调用都会直接触发底层的 `block_read` 或 `block_write`，从而产生繁重的磁盘机械寻道开销。为了解决这一问题，我们在逻辑文件系统（Inode Layer）与物理设备驱动（Block Driver）之间引入了一个中间层——**Buffer Cache**。这个中间层利用内存的高速特性来缓冲磁盘块，其设计核心遵循**局部性原理（Locality of Reference）**。具体而言，它利用**时间局部性**保证刚被访问的数据能直接从内存再次获取（Cache Hit），同时利用**空间局部性**预判刚被访问数据的周边数据可能即将被访问，从而实现预读（Read-ahead）。
+
+**系统架构数据流图：**
+
+![os4_01.png](os4_01.png)
+
+---
+
+#### **2. 核心数据结构设计**
+
+为了有效管理 64 个缓存块，我们需要定义一个缓存条目结构体 `cache_entry` 以及相应的全局管理结构。
+
+```c
+/* filesys/cache.c */
+
+#define CACHE_SIZE 64
+
+struct cache_entry {
+    block_sector_t sector;      /* 该块对应磁盘上的哪个扇区 (Tag) */
+    uint8_t data[BLOCK_SECTOR_SIZE]; /* 512字节的实际数据载荷 */
+    
+    /* 状态标志位 */
+    bool is_valid;              /* 槽位是否已被占用 */
+    bool is_dirty;              /* 脏位：数据被修改且尚未写回磁盘 */
+    bool accessed;              /* 访问位：用于 Clock/LRU 替换算法 */
+    
+    /* 并发控制 */
+    struct lock entry_lock;     /* 条目锁：允许对不同扇区的并发读写 */
+    int open_cnt;               /* 引用计数：防止在使用过程中被驱逐 (可选设计) */
+};
+
+/* 全局缓存管理器 */
+static struct cache_entry cache[CACHE_SIZE];
+static struct lock global_cache_lock; /* 全局锁：保护 cache 数组本身的分配与查找 */
+```
+
+**设计考量：**
+
+我们采用了**细粒度锁 (Fine-grained Locking)** 的设计策略。系统仅使用 `global_cache_lock` 来保护缓存槽位的分配与查找过程，即决定“哪个扇区在哪个位置”。一旦锁定了目标缓存条目，每个条目独有的 `entry_lock` 将接管后续的保护工作。这种设计意味着，一旦查找完成，线程 A 可以读取 Sector 1，与此同时线程 B 可以读取 Sector 2，二者互不阻塞，从而极大地提升了文件系统的并发性能。
+
+
+
+#### **3. 核心算法与实现逻辑**
+
+#### **3.1 缓存查找与访问 (Lookup & Access)**
+
+
+**代码片段示意：**
+
+```c
+struct cache_entry *cache_get_block(block_sector_t sector, bool exclusive) {
+    lock_acquire(&global_cache_lock);
+
+    /* 1. 尝试查找 */
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        if (cache[i].is_valid && cache[i].sector == sector) {
+            cache[i].accessed = true; // 标记为最近访问
+            lock_acquire(&cache[i].entry_lock); // 获取条目锁
+            lock_release(&global_cache_lock);   // 释放全局锁，允许其他线程查找其他块
+            return &cache[i];
+        }
+    }
+
+    /* 2. 未命中，需要驱逐 */
+    int victim_idx = cache_evict(); // 调用置换算法
+    struct cache_entry *entry = &cache[victim_idx];
+
+    /* 3. 加载新数据 */
+    entry->sector = sector;
+    entry->is_valid = true;
+    entry->is_dirty = false;
+    entry->accessed = true;
+    block_read(fs_device, sector, entry->data); // I/O 操作
+
+    lock_acquire(&entry->entry_lock);
+    lock_release(&global_cache_lock);
+    return entry;
+}
+```
+
+当 `inode` 层请求读写某个扇区时，缓存层首先需要查找该扇区是否存在。整个流程从获取全局锁 `global_cache_lock` 开始，系统遍历或通过哈希查找 `cache` 数组，寻找匹配 `sector` 且 `is_valid` 的条目。
+
+如果**命中 (Hit)**，系统会获取该条目的 `entry_lock`，更新其 `accessed` 标志位以防止被置换算法误删，随即释放全局锁以允许其他线程进行查找，最后执行内存读写操作。如果**未命中 (Miss)**，系统则需执行置换算法找到一个牺牲帧。若该牺牲帧被标记为 Dirty，必须先将其写回磁盘。随后，系统将目标扇区从磁盘读入该槽位，更新元数据，并最终在持有条目锁且释放全局锁的状态下完成操作。
+
+Buffer Cache 并发访问控制流程图如下:
+<p align="center">
+  <img src="os1 (2)_01.png" width="80%">
+</p>
+
+#### **3.2 置换策略：Clock 算法 (Clock Algorithm)**
+
+
+
+```c
+int cache_evict(void) {
+    // 假设调用此函数前已持有 global_cache_lock
+    while (true) {
+        if (cache[clock_hand].is_valid) {
+            if (cache[clock_hand].accessed) {
+                cache[clock_hand].accessed = false; // 给第二次机会
+            } else {
+                // 找到牺牲者
+                if (cache[clock_hand].is_dirty) {
+                    // 写回磁盘 (Write-back)
+                    block_write(fs_device, cache[clock_hand].sector, cache[clock_hand].data);
+                }
+                return clock_hand;
+            }
+        } else {
+            // 发现空闲槽位，直接使用
+            return clock_hand;
+        }
+        clock_hand = (clock_hand + 1) % CACHE_SIZE;
+    }
+}
+```
+
+鉴于 LRU 算法在维护链表顺序时开销较大，我们通常使用 **Clock (Second Chance)** 算法作为其近似实现。我们将缓存数组视为一个环形缓冲区，并维护一个全局指针 `clock_hand`。算法执行时，检查指针指向的条目：如果 `accessed` 为真，表示最近被使用过，算法将其置为 `false` 给予“第二次机会”并前移指针；如果 `accessed` 为假，则选中该条目为牺牲帧。在确立牺牲帧后，必须进行关键检查，即如果该条目是 Dirty 的，必须先调用 `block_write` 保证数据一致性，随后返回该条目索引。
+
+#### **3.3 写回策略 (Write-behind)**
+
+为了进一步减少 I/O，我们实现了 Write-behind 策略。当 `inode_write_at` 修改数据时，系统仅修改 Cache 中的数据并将 `is_dirty` 置为 `true`，实现了**延迟写**，而不立即触发磁盘操作。真正的物理写入（强制刷新）只发生在三种情况：一是**驱逐时**，由 Clock 算法触发；二是**关机时**，必须在 `filesys_done()` 中遍历并写回所有脏块以免数据丢失；三是通过**后台线程 (Periodic Flush)**，例如创建一个 `cache_flush_daemon` 线程每隔数秒唤醒一次，将脏块写回并清除脏位，从而防止系统崩溃导致的大量数据丢失。
+
+#### **4. 预读机制 (Read-ahead) [优化项]**
+
+为了加速顺序读取（例如执行 `cat huge_file`），我们可以实现预读机制。当系统检测到对扇区 `N` 的读取请求时，可以智能地创建一个后台任务，预先将扇区 `N+1` 加载到缓存中（若尚不在缓存内）。这种机制采用了**异步设计**，预读操作通过 `thread_create` 启动临时的 helper 线程来执行，或者通过维护一个预读队列来完成，确保不会阻塞当前用户线程的读操作。
+
+#### **5. 总结：性能提升分析**
+
+引入 Buffer Cache 后，系统性能将发生质变。首先，系统实现了**合并写操作**，对同一扇区的多次微小写入（如日志更新）在内存中累积，最终仅产生一次磁盘写入。其次，**热点数据驻留**使得根目录 inode 或 Free Map 等高频元数据长期留存内存，消除了频繁的磁盘读取。最后，得益于细粒度锁的设计，系统具备了强大的**并发能力**，使得多文件读取能真正并行处理，不再受制于物理磁盘机械臂的串行排队。
+
+***
+
+### **任务二：Extensible Files——可扩展文件**
+
+    Description：
+      修改 inode 的结构和分配算法，使文件不再受限于创建时的初始大小，且允许文件数据在磁盘上非连续存储。
+      具体要求包括：
+        1. 废除原有的 `start` + `length` 的连续分配方式。
+        2. 实现类似 Unix 的多级索引结构（直接块、间接块、双重间接块）。
+        3. 支持文件通过 `file_write` 超越当前 EOF（End of File）进行写入，自动分配新块。
+        4. 支持稀疏文件（Sparse Files），即文件中间存在空洞时不占用实际磁盘空间。
+
+**任务背景与核心流程**
+
+在基础代码中，`byte_to_sector` 函数的实现如下：
+`return inode->data.start + pos / BLOCK_SECTOR_SIZE;`
+这假设了文件是连续存储的。这导致了两个严重问题：
+1.  **外部碎片**：随着文件系统的使用，难以找到大块的连续空闲空间。
+2.  **无法扩展**：如果文件末尾之后的扇区被其他文件占用，该文件就无法增长。
+
+为了解决这个问题，我们需要引入**索引分配（Indexed Allocation）**。
+
+**核心设计与实现逻辑**
+
+1.  **重构 `inode_disk` 结构**：
+    我们需要利用 `inode_disk` 中原本未使用的空间（`unused` 字段）来存储索引指针。标准的 Unix FFS 设计如下：
+
+    ```c
+    struct inode_disk {
+      off_t length;         /* 文件大小 */
+      unsigned magic;
+      uint32_t is_dir;
+      
+      /* 索引结构 */
+      block_sector_t direct[123];   /* 直接块指针：直接指向数据扇区 */
+      block_sector_t indirect;      /* 间接块指针：指向一个存有128个扇区号的块 */
+      block_sector_t double_indirect; /* 双重间接块指针 */
+    };
+    ```
+    *   **直接块**：直接存储数据。
+    *   **间接块**：存储一个指针块，该块中包含 128 个指向数据块的指针。
+    *   **双重间接块**：指向一个指针块，该块中的每个指针又指向一个间接块。
+
+2.  **修改 `byte_to_sector`**：
+    原来的简单加法必须改为树状查找。
+    *   若 `pos < 123 * 512`：直接查 `direct[pos / 512]`。
+    *   若超出范围：读取 `indirect` 指向的扇区，从中查找对应的索引。
+    *   以此类推。
+
+3.  **实现自动增长（File Growth）**：
+    在 `inode_write_at` 中，如果写入的 `offset + size` 超过了当前的 `inode->length`，或者写入到了一个尚未分配的“空洞”区域，系统必须：
+    *   计算需要多少个新扇区。
+    *   调用 `free_map_allocate` 分配新扇区。
+    *   更新索引表（可能需要分配新的间接块）。
+    *   如果是稀疏文件写入（例如在 offset 1MB 处写入，但中间未写入），只分配实际数据的块，中间的索引指针保持为 0。
+
+下图展示了索引结构的逻辑：
+
+<p align="center">
+  <img src="os1_01.png" width="90%">
+</p>
+
+
+***
+
+### **任务三：Subdirectories——多级目录支持**
+
+    Description：
+      实现分层命名空间支持。在基本的文件系统中，所有文件都存在于一个根目录中。我们需要扩展文件系统以支持目录嵌套。
+      具体要求包括：
+        1. 能够解析包含 '/' 的路径，支持绝对路径（以 '/' 开头）和相对路径（从当前工作目录开始）。
+        2. 支持特殊路径名 "."（当前目录）和 ".."（父目录）。
+        3. 能够创建子目录（mkdir）和更改当前工作目录（chdir）。
+        4. 只有当目录为空（仅包含 '.' 和 '..'）时才允许删除。
+        5. 在 inode 结构中区分普通文件与目录文件。
+      为了实现这一点，你需要修改路径解析逻辑，使其能够逐级遍历目录树，并在创建目录时自动初始化 "." 和 ".." 条目。
+
+**任务背景与核心流程**
+
+在支持多级目录之前，Pintos 的路径解析非常简单：直接在根目录中查找文件名。引入子目录后，目录不再仅仅是文件的容器，它本身也成为了一种特殊的文件。
+
+**目录即文件（Directory as a File）**
+从底层存储的角度来看，目录和普通文件一样，都由一个 `inode` 描述，并且占用磁盘扇区。不同之处在于，目录的数据区存储的不是用户数据，而是一系列 **目录项（Directory Entries）**。每个目录项包含了一个文件名（字符串）和一个对应的 inode 扇区号（引用）。为了区分二者，我们在 `struct inode_disk` 中引入了一个标志位 `is_dir`。
+
+**路径解析（Path Resolution）**
+这是本任务的核心。当系统接收到一个路径字符串（如 `/usr/bin/code`）时，不能直接查找整个字符串。系统必须像剥洋葱一样，从起点（根目录或当前工作目录）开始，解析出第一级目录名（`usr`），找到其 inode 并打开；然后在 `usr` 中解析第二级（`bin`），依此类推，直到找到最终的目标。这个过程被称为 Walk the Tree。
+
+**目录树的一致性**
+为了保证目录树的结构完整且可遍历，在创建新目录时，系统强制要求包含两个特殊条目：
+*   **`.` (dot)**：指向目录自身的 inode。这使得程序可以方便地引用当前上下文。
+*   **`..` (dot-dot)**：指向父目录的 inode。这是实现 `cd ..` 返回上一级功能的物理基础。
+
+同时，为了防止出现“孤儿文件”（即无法从根目录访问到的文件），在删除目录时必须实施严格的检查：只有当目录为空（除了 `.` 和 `..` 不包含其他条目）时，才允许删除。
+
+详细解释如下：
+
+##### 1. 路径解析逻辑 `parse_path`：
+
+```C
+/* filesys.c */
+static struct dir* parse_path(const char* path_orig, char* file_name) {
+  struct dir* dir;
+  
+  /* 1. 决定起始目录 */
+  if (path[0] == '/') {
+    dir = dir_open_root();
+  } else {
+    struct thread* t = thread_current();
+    if (t->cwd == NULL) 
+      dir = dir_open_root();
+    else
+      dir = dir_reopen(t->cwd);
+  }
+  
+  // ... (省略部分内存分配代码) ...
+
+  /* 2. 遍历路径 */
+  char *token, *next_token, *save_ptr;
+  token = strtok_r(path, "/", &save_ptr);
+  next_token = strtok_r(NULL, "/", &save_ptr);
+
+  /* 如果路径本身就是 "/" 或为空 */
+  if (token == NULL) {
+    strlcpy(file_name, ".", NAME_MAX + 1);
+    // ...
+    return dir;
+  }
+
+  while (next_token != NULL) {
+    struct inode* inode = NULL;
+    // 在当前目录 dir 中查找下一级目录名 token
+    if (!dir_lookup(dir, token, &inode)) {
+        dir_close(dir);
+        return NULL; /* 路径中间节点不存在 */
+    }
+
+    struct dir* next_dir = dir_open(inode);
+    dir_close(dir); // 关闭上一级目录，防止内存泄漏
+    if (next_dir == NULL) {
+        return NULL; /* 路径中间节点不是目录 */
+    }
+
+    dir = next_dir;
+    token = next_token;
+    next_token = strtok_r(NULL, "/", &save_ptr);
+  }
+
+  /* 3. 输出文件名 */
+  strlcpy(file_name, token, NAME_MAX + 1);
+  // ...
+  return dir;
+}
+```
+
+`parse_path` 是多级目录实现的基石函数。它的核心职责是将一个复杂的路径字符串分解为“父目录对象”和“最终文件名”。
+*   **起点判定**：首先根据路径的首字符是否为 `/` 来判断是**绝对路径**还是**相对路径**。如果是相对路径，则从当前线程的 `cwd`（Current Working Directory）开始。
+*   **迭代查找**：利用 `strtok_r` 函数将路径按 `/` 分割。算法采取“预读”策略（Look-ahead）：始终保留 `token` 作为当前处理的节点，并检查 `next_token` 是否存在。如果 `next_token` 存在，说明 `token` 是一个中间目录，系统必须通过 `dir_lookup` 找到它并“进入”（`dir_open`）。
+*   **错误处理**：如果中间的任何一个节点不存在，或者中间节点是一个文件而非目录，函数将立即返回失败。
+*   **结果返回**：循环结束后，`dir` 指向了路径最后一级所在的目录，而 `file_name` 则保存了最后的目标文件名。这为后续的创建、打开或删除操作做好了准备。
+
+##### 2. 目录创建 `filesys_mkdir`：
+
+```C
+/* filesys.c */
+bool filesys_mkdir(const char* name) {
+  char file_name[NAME_MAX + 1];
+  struct dir* dir = parse_path(name, file_name);
+  
+  // ... (省略空指针检查) ...
+
+  block_sector_t inode_sector = 0;
+  /* 参数 true 表示创建目录，这会在 inode 中设置 is_dir 标志 */
+  bool success = (free_map_allocate(1, &inode_sector) &&
+                  dir_create(inode_sector, 16) &&
+                  dir_add(dir, file_name, inode_sector));
+
+  if (success) {
+      /* 如果创建成功，需要为新目录添加 . 和 .. */
+      struct dir* new_dir = dir_open(inode_open(inode_sector));
+      if (new_dir) {
+          dir_add(new_dir, ".", inode_sector);
+          /* ".." 指向父目录的 inode sector */
+          dir_add(new_dir, "..", inode_get_inumber(dir_get_inode(dir)));
+          dir_close(new_dir);
+      } 
+  }
+  // ... (省略错误处理与资源释放) ...
+  return success;
+}
+```
+
+`filesys_mkdir` 实现了创建新目录的逻辑。除了分配扇区和在父目录中注册名字外，最关键的代码在于对 `.` 和 `..` 的初始化。
+*   **类型标识**：调用 `dir_create` 时，底层会调用 `inode_create(..., true)`，这会将磁盘 inode 中的 `is_dir` 字段置为 1，从而在文件系统层面标记这是一个目录。
+*   **父子链接**：在 `dir_add` 成功将新目录名加入父目录后，函数立即打开这个新创建的目录，并手动写入两个条目：`.` 指向新目录自己的扇区号；`..` 指向父目录 `dir` 的扇区号。这一步是维持目录树连通性的关键，否则用户一旦进入该目录，将无法返回上一级。
+
+##### 3. 切换工作目录 `filesys_chdir`：
+
+```C
+/* filesys.c */
+bool filesys_chdir(const char* name) {
+  char file_name[NAME_MAX + 1];
+  
+  /* 解析路径 */
+  struct dir* parent = parse_path(name, file_name);
+  
+  if (parent != NULL) {
+      struct inode* inode = NULL;
+      // ... (省略对 . 和 .. 的特殊查找逻辑) ...
+      dir_lookup(parent, file_name, &inode);
+      
+      dir_close(parent);
+
+      if (inode != NULL) {
+          /* 确保切换到的是目录 */
+          if (inode_is_dir(inode)) {
+              struct thread* t = thread_current();
+              if (t->cwd) dir_close(t->cwd);
+              t->cwd = dir_open(inode);
+              return true;
+          }
+          inode_close(inode);
+      }
+  }
+  return false;
+}
+```
+
+`filesys_chdir` 对应于 Shell 中的 `cd` 命令。它通过 `parse_path` 找到目标路径对应的 inode。这里有一个非常重要的**类型检查**：`inode_is_dir(inode)`。因为用户可能会尝试 `cd` 进一个文本文件，这是不合法的操作，系统必须予以拦截。如果检查通过，函数将更新当前线程 `thread_current()` 结构体中的 `cwd` 指针。由于每个线程都有独立的 `cwd`，这使得不同的进程可以在不同的目录下并发工作而不互相干扰。
+
+##### 4. 目录删除的安全检查 `dir_remove`：
+
+```C
+/* directory.c */
+bool dir_remove(struct dir* dir, const char* name) {
+  // ... (查找目录项并获取 inode) ...
+
+  /* 如果是目录，必须确保为空 */
+  if (inode_is_dir(inode)) {
+      struct dir* target = dir_open(inode);
+      bool empty = dir_is_empty(target);
+      dir_close(target); // 关闭 target view，inode 仍被外层 open 持有引用
+      
+      if (!empty) {
+          goto done; // 禁止删除非空目录
+      }
+  }
+
+  // ... (执行常规的删除操作：清除目录项，标记 inode 为 removed) ...
+}
+
+/* directory.c 辅助函数 */
+bool dir_is_empty(struct dir* dir) {
+  struct dir_entry e;
+  off_t ofs;
+
+  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e) {
+    if (e.in_use) {
+      /* 只要发现除了 . 和 .. 之外的任何有效条目，即认为非空 */
+      if (strcmp(e.name, ".") != 0 && strcmp(e.name, "..") != 0) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+```
+
+在 Unix 文件系统语义中，`rm` 命令通常不能直接删除非空目录（除非使用递归标志，那是由用户态程序处理的）。在内核态，`dir_remove` 必须保证安全性。
+*   **防止断链**：如果删除了一个包含文件的目录，那些文件的数据块虽然在磁盘上存在，但已经无法通过任何路径访问到，造成磁盘空间的永久泄漏（Orphaned Inodes）。
+*   **实现逻辑**：代码首先判断待删除的目标是否为目录。如果是，则打开该目录并调用 `dir_is_empty`。该函数遍历目录内容，忽略 `.` 和 `..`。只有当确实没有其他文件存在时，删除操作才会被允许执行。这确保了文件系统树剪枝操作的原子性和安全性。
+
+
+至此，filesys成功通过了测试点，获得了97分。
+
+***
+
+
+
+## **实验总结**
 
 在此次操作系统课程设计实验中，我收获了丰富的知识与实践经验，不仅加深了对专业知识的理解，还提升了实际操作与问题解决的能力。以下是我在实验过程中对各方面内容的总结与反思：
 
@@ -3421,6 +4039,9 @@ Pintos 实验本质上是一次针对高并发环境下复杂工程问题的攻�
 
 在面对死锁检测、状态流转等复杂逻辑时，我养成了**可视化思维（Visual Thinking）**的习惯。在编码之前，我通过绘制**状态机流转图（State Transition Diagram）**和**资源分配图（Resource Allocation Graph）**，将抽象的并发逻辑具象化。例如，在设计 `wait` 和 `exit` 系统调用时，我画出了父子进程在不同时间点退出时的时序图，从而精准定位到了可能存在的“悬空指针”风险。此外，在回答 Design Doc 中的 Question 部分时，我能够运用准确的专业术语（如上下文切换、临界区、原子性）来描述系统行为，这种将图形化思维转化为精准文字描述的能力，证明了我不仅能实现系统，更能清晰、逻辑地阐述系统的运行机理。
 
+
+
+
 #### **六、对环境和社会可持续发展的思考**
 
 ##### **（一）绿色计算与资源优化**
@@ -3431,10 +4052,12 @@ Pintos 实验本质上是一次针对高并发环境下复杂工程问题的攻�
 
 操作系统作为数字世界的基石，其健壮性与安全性直接关乎社会基础设施的稳定运行。在实验中，我对**系统调用安全性**和**文件系统保护**的严苛要求，实际上是在模拟构建高可靠性的关键任务系统（Mission-Critical Systems）。无论是智慧城市的交通调度、智能电网的能源分配，还是医疗系统的实时监控，都依赖于底层 OS 提供的实时响应与隔离保护能力。例如，我所实现的优先级捐赠算法，正是解决实时系统（Real-Time Systems）中不可预知延迟的关键技术，这对于保障自动驾驶汽车或工业控制系统的安全性至关重要。因此，掌握这些核心技术，不仅是个人技能的提升，更是为未来构建更安全、更高效的社会数字化底座贡献力量的准备。
 
+
+
 #### **七、总结**
 
 本次操作系统课程设计是一次从理论认知迈向系统构建的深度蜕变之旅。通过在 Pintos 内核上的数千行代码实践，我并没有止步于“完成作业”，而是真正触摸到了现代计算机系统的脉搏。
 
 从线程调度的微观竞争，到进程管理的宏观协作；从虚拟内存的抽象映射，到系统调用的特权穿越，每一个模块的实现都是对计算机科学核心原理的再验证。我学会了如何在极其受限的内核环境下进行**防御性编程**，如何在复杂的并发场景下抽丝剥茧定位死锁与竞态，以及如何权衡**算法复杂度与系统开销**。
 
-更重要的是，这次经历培养了我面对庞大遗留代码库（Legacy Codebase）时的工程勇气与架构思维。我深刻体会到，优秀的系统软件不仅仅是功能的堆砌，更是对**一致性、原子性与隔离性**的极致追求。这一过程中积累的底层视角、调试技巧以及系统设计方法论，将成为我未来在计算机系统领域探索的坚实基石，支撑我去解决更具挑战性的复杂工程问题，为构建更美好的数字社会贡献智慧。
+更重要的是，这次经历培养了我面对庞大代码库时的工程勇气与架构思维。我深刻体会到，优秀的系统软件不仅仅是功能的堆砌，更是对**一致性、原子性与隔离性**的极致追求。这一过程中积累的底层视角、调试技巧以及系统设计方法论，将成为我未来在计算机系统领域探索的坚实基石，支撑我去解决更具挑战性的复杂工程问题，为构建更美好的数字社会贡献智慧。
