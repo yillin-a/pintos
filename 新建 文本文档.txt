@@ -36,4 +36,6 @@ remote: Resolving deltas: 100% (224/224), done.
 To https://github.com/yillin-a/pintos.git
  * [new branch]      main -> main
 branch 'main' set up to track 'origin/main'.
+PS D:\OS_homework\iaf> git push -u origin main
+fatal: unable to access 'https://github.com/yillin-a/pintos.git/': Failed to connect to github.com port 443 after 21074 ms: Could not connect to server
 PS D:\OS_homework\iaf>
